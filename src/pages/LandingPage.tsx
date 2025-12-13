@@ -96,9 +96,9 @@ export default function LandingPage() {
             </div>
             
             {/* Headline */}
-            <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-display font-semibold text-foreground mb-8 leading-[1.1] tracking-tight animate-fade-up opacity-0 stagger-1 text-balance">
+            <h1 className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-display font-semibold text-foreground mb-8 leading-[1.05] tracking-tight animate-fade-up opacity-0 stagger-1 text-balance">
               Engage Your Users with
-              <span className="text-gradient italic"> Smart Push</span>
+              <span className="text-gradient"> Smart Push</span>
             </h1>
             
             {/* Subheadline */}
