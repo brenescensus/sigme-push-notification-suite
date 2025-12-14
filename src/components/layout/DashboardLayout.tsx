@@ -1,7 +1,6 @@
 import { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
-  Bell,
   LayoutDashboard,
   Users,
   Send,
@@ -11,10 +10,13 @@ import {
   LogOut,
   Menu,
   ChevronRight,
+  Globe,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { WebsiteSelector } from "@/components/dashboard/WebsiteSelector";
+import sigmeLogo from "@/assets/sigme-logo.png";
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -22,6 +24,7 @@ interface DashboardLayoutProps {
 
 const navigation = [
   { name: "Overview", href: "/dashboard", icon: LayoutDashboard },
+  { name: "Websites", href: "/dashboard/websites", icon: Globe },
   { name: "Subscribers", href: "/dashboard/subscribers", icon: Users },
   { name: "Campaigns", href: "/dashboard/campaigns", icon: Send },
   { name: "Analytics", href: "/dashboard/analytics", icon: BarChart3 },
@@ -37,10 +40,7 @@ function Sidebar({ className }: { className?: string }) {
       {/* Logo */}
       <div className="h-16 flex items-center px-6 border-b border-sidebar-border">
         <Link to="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 gradient-primary rounded-lg flex items-center justify-center">
-            <Bell className="w-4 h-4 text-primary-foreground" />
-          </div>
-          <span className="text-lg font-bold text-sidebar-foreground">Sigme</span>
+          <img src={sigmeLogo} alt="Sigme360" className="h-7" />
         </Link>
       </div>
 
@@ -103,10 +103,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       {/* Mobile Header */}
       <header className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 glass border-b border-border/50 flex items-center justify-between px-4">
         <Link to="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 gradient-primary rounded-lg flex items-center justify-center">
-            <Bell className="w-4 h-4 text-primary-foreground" />
-          </div>
-          <span className="text-lg font-bold text-foreground">Sigme</span>
+          <img src={sigmeLogo} alt="Sigme360" className="h-6" />
         </Link>
 
         <Sheet>
@@ -126,9 +123,10 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
         {/* Page Header */}
         <div className="sticky top-0 z-40 glass border-b border-border/50">
           <div className="h-16 flex items-center justify-between px-6 lg:px-8">
-            <div className="flex items-center gap-2 pt-16 lg:pt-0">
+            <div className="flex items-center gap-4 pt-16 lg:pt-0">
               <h1 className="text-xl font-semibold text-foreground">{pageTitle}</h1>
             </div>
+            <WebsiteSelector />
           </div>
         </div>
 
