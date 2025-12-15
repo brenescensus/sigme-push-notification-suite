@@ -473,7 +473,7 @@ export default function CampaignsPage() {
                         onChange={setScheduleConfig}
                       />
                       
-                      {!limits.canUseRecurring && scheduleConfig.type === "recurring" && (
+                      {limits.plan === "free" && scheduleConfig.type === "recurring" && (
                         <div className="mt-4 p-4 rounded-xl bg-amber-50 border border-amber-200">
                           <p className="text-sm text-amber-800">
                             🔒 Recurring notifications require a Premium plan.

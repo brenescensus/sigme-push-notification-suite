@@ -1,1 +1,7 @@
 project_id = "cshoskwtvjhlwgxntjzs"
+
+[functions.register-subscriber]
+verify_jwt = false
+
+[functions.track-notification]
+verify_jwt = false

@@ -1,159 +1,138 @@
 /**
- * useOwnerAccess Hook
+ * useOwnerAccess Hook (Production Version)
  * 
- * Determines if the current user is the platform owner with unlimited access.
- * 
- * IMPORTANT: This is a frontend-only check for UI purposes.
- * All actual access control MUST be enforced server-side via:
- * - Supabase RLS policies
- * - Edge function authentication
- * - Database role checks
- * 
- * Owner identification should be done via:
- * - A specific user_id stored securely
- * - A role in the user_roles table
- * - An API key with owner privileges
- * 
- * This hook is designed to be easily connected to a real backend.
+ * Checks user roles from the database to determine owner status.
+ * Owner users have unlimited access to all features.
  */
 
 import { useState, useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
-interface OwnerAccessState {
+interface UsageLimits {
+  maxWebsites: number;
+  maxSubscribersPerWebsite: number;
+  maxNotificationsPerMonth: number;
+  currentNotificationsThisMonth: number;
+  plan: string;
+}
+
+interface OwnerAccessResult {
   isOwner: boolean;
   isLoading: boolean;
-  limits: UserLimits;
+  limits: UsageLimits;
+  userId: string | null;
 }
 
-interface UserLimits {
-  maxSubscribers: number | null; // null = unlimited
-  maxNotificationsPerMonth: number | null;
-  maxCampaigns: number | null;
-  canUseScheduling: boolean;
-  canUseRecurring: boolean;
-  canUseAdvancedTargeting: boolean;
-  canUseIntegrations: boolean;
-  canAccessApi: boolean;
-}
-
-// Owner gets unlimited everything
-const OWNER_LIMITS: UserLimits = {
-  maxSubscribers: null,
-  maxNotificationsPerMonth: null,
-  maxCampaigns: null,
-  canUseScheduling: true,
-  canUseRecurring: true,
-  canUseAdvancedTargeting: true,
-  canUseIntegrations: true,
-  canAccessApi: true,
+const DEFAULT_LIMITS: UsageLimits = {
+  maxWebsites: 1,
+  maxSubscribersPerWebsite: 1000,
+  maxNotificationsPerMonth: 10000,
+  currentNotificationsThisMonth: 0,
+  plan: "free",
 };
 
-// Standard user limits (can be adjusted)
-const STANDARD_LIMITS: UserLimits = {
-  maxSubscribers: 10000,
-  maxNotificationsPerMonth: 100000,
-  maxCampaigns: 50,
-  canUseScheduling: true,
-  canUseRecurring: false, // Premium feature
-  canUseAdvancedTargeting: false,
-  canUseIntegrations: true,
-  canAccessApi: true,
+const OWNER_LIMITS: UsageLimits = {
+  maxWebsites: Infinity,
+  maxSubscribersPerWebsite: Infinity,
+  maxNotificationsPerMonth: Infinity,
+  currentNotificationsThisMonth: 0,
+  plan: "owner",
 };
 
-// Free tier limits
-const FREE_LIMITS: UserLimits = {
-  maxSubscribers: 500,
-  maxNotificationsPerMonth: 5000,
-  maxCampaigns: 5,
-  canUseScheduling: false,
-  canUseRecurring: false,
-  canUseAdvancedTargeting: false,
-  canUseIntegrations: false,
-  canAccessApi: false,
-};
-
-/**
- * Custom hook to check owner access status
- * 
- * In production, this should:
- * 1. Fetch the current user's session from Supabase
- * 2. Check their role in the user_roles table via RLS
- * 3. Return appropriate limits based on their plan/role
- */
-export function useOwnerAccess(): OwnerAccessState {
-  const [state, setState] = useState<OwnerAccessState>({
-    isOwner: false,
-    isLoading: true,
-    limits: STANDARD_LIMITS,
-  });
+export function useOwnerAccess(): OwnerAccessResult {
+  const [isOwner, setIsOwner] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [limits, setLimits] = useState<UsageLimits>(DEFAULT_LIMITS);
+  const [userId, setUserId] = useState<string | null>(null);
 
   useEffect(() => {
-    // Simulate async role check
-    // In production, replace with actual Supabase query:
-    // 
-    // const checkOwnerStatus = async () => {
-    //   const { data: { user } } = await supabase.auth.getUser();
-    //   if (!user) return { isOwner: false, limits: FREE_LIMITS };
-    //   
-    //   const { data: roles } = await supabase
-    //     .from('user_roles')
-    //     .select('role')
-    //     .eq('user_id', user.id);
-    //   
-    //   const isOwner = roles?.some(r => r.role === 'owner' || r.role === 'admin');
-    //   return { isOwner, limits: isOwner ? OWNER_LIMITS : STANDARD_LIMITS };
-    // };
+    let isMounted = true;
 
-    const checkAccess = async () => {
-      // Demo: Always set as owner for development
-      // In production, this would be a real API call
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      
-      // For demo purposes, we're setting the user as owner
-      // This should be replaced with actual authentication logic
-      setState({
-        isOwner: true,
-        isLoading: false,
-        limits: OWNER_LIMITS,
-      });
+    async function checkOwnerStatus() {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (!session?.user) {
+          if (isMounted) {
+            setIsOwner(false);
+            setLimits(DEFAULT_LIMITS);
+            setUserId(null);
+            setIsLoading(false);
+          }
+          return;
+        }
+
+        if (isMounted) {
+          setUserId(session.user.id);
+        }
+
+        // Check if user has owner role
+        const { data: hasOwnerRole, error: roleError } = await supabase.rpc(
+          'is_owner',
+          { _user_id: session.user.id }
+        );
+
+        if (roleError) {
+          console.error("Error checking owner status:", roleError);
+        }
+
+        if (hasOwnerRole) {
+          if (isMounted) {
+            setIsOwner(true);
+            setLimits(OWNER_LIMITS);
+            setIsLoading(false);
+          }
+          return;
+        }
+
+        // Get user's usage limits
+        const { data: usageLimits, error: limitsError } = await supabase
+          .from("usage_limits")
+          .select("*")
+          .eq("user_id", session.user.id)
+          .maybeSingle();
+
+        if (limitsError) {
+          console.error("Error fetching usage limits:", limitsError);
+        }
+
+        if (isMounted) {
+          if (usageLimits) {
+            setLimits({
+              maxWebsites: usageLimits.max_websites,
+              maxSubscribersPerWebsite: usageLimits.max_subscribers_per_website,
+              maxNotificationsPerMonth: usageLimits.max_notifications_per_month,
+              currentNotificationsThisMonth: usageLimits.current_notifications_this_month,
+              plan: usageLimits.plan,
+            });
+          } else {
+            setLimits(DEFAULT_LIMITS);
+          }
+          setIsOwner(false);
+          setIsLoading(false);
+        }
+      } catch (error) {
+        console.error("Error in useOwnerAccess:", error);
+        if (isMounted) {
+          setIsOwner(false);
+          setLimits(DEFAULT_LIMITS);
+          setIsLoading(false);
+        }
+      }
+    }
+
+    checkOwnerStatus();
+
+    // Subscribe to auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
+      checkOwnerStatus();
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
     };
-
-    checkAccess();
   }, []);
 
-  return state;
+  return { isOwner, isLoading, limits, userId };
 }
-
-/**
- * Helper function to check if a specific feature is available
- */
-export function useFeatureAccess(feature: keyof UserLimits): boolean {
-  const { limits } = useOwnerAccess();
-  return !!limits[feature];
-}
-
-/**
- * Get the appropriate limits based on user tier
- */
-export function getLimitsForTier(tier: "owner" | "premium" | "standard" | "free"): UserLimits {
-  switch (tier) {
-    case "owner":
-      return OWNER_LIMITS;
-    case "premium":
-      return {
-        ...STANDARD_LIMITS,
-        maxSubscribers: 100000,
-        maxNotificationsPerMonth: 1000000,
-        canUseRecurring: true,
-        canUseAdvancedTargeting: true,
-      };
-    case "standard":
-      return STANDARD_LIMITS;
-    case "free":
-    default:
-      return FREE_LIMITS;
-  }
-}
-
-export { OWNER_LIMITS, STANDARD_LIMITS, FREE_LIMITS };
-export type { UserLimits, OwnerAccessState };
