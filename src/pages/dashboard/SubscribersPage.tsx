@@ -9,6 +9,7 @@ import {
   Monitor,
   Globe,
   MapPin,
+  Send,
 } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
@@ -26,100 +27,26 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { TestNotificationDialog } from "@/components/subscribers/TestNotificationDialog";
+import { useWebsite } from "@/contexts/WebsiteContext";
+import { supabase } from "@/integrations/supabase/client";
+import { useQuery } from "@tanstack/react-query";
 
-const subscribers = [
-  {
-    id: "1",
-    browser: "Chrome",
-    device: "Desktop",
-    os: "Windows",
-    country: "United States",
-    city: "New York",
-    subscribedAt: "2024-01-15T10:30:00Z",
-    status: "active",
-    lastActive: "2024-01-20T14:22:00Z",
-  },
-  {
-    id: "2",
-    browser: "Safari",
-    device: "Mobile",
-    os: "iOS",
-    country: "United Kingdom",
-    city: "London",
-    subscribedAt: "2024-01-14T08:15:00Z",
-    status: "active",
-    lastActive: "2024-01-20T09:45:00Z",
-  },
-  {
-    id: "3",
-    browser: "Firefox",
-    device: "Desktop",
-    os: "macOS",
-    country: "Germany",
-    city: "Berlin",
-    subscribedAt: "2024-01-12T16:45:00Z",
-    status: "active",
-    lastActive: "2024-01-19T18:30:00Z",
-  },
-  {
-    id: "4",
-    browser: "Chrome",
-    device: "Mobile",
-    os: "Android",
-    country: "Canada",
-    city: "Toronto",
-    subscribedAt: "2024-01-10T12:00:00Z",
-    status: "inactive",
-    lastActive: "2024-01-15T11:20:00Z",
-  },
-  {
-    id: "5",
-    browser: "Edge",
-    device: "Desktop",
-    os: "Windows",
-    country: "Australia",
-    city: "Sydney",
-    subscribedAt: "2024-01-08T22:30:00Z",
-    status: "active",
-    lastActive: "2024-01-20T06:15:00Z",
-  },
-  {
-    id: "6",
-    browser: "Chrome",
-    device: "Tablet",
-    os: "Android",
-    country: "France",
-    city: "Paris",
-    subscribedAt: "2024-01-05T14:20:00Z",
-    status: "active",
-    lastActive: "2024-01-18T19:40:00Z",
-  },
-  {
-    id: "7",
-    browser: "Safari",
-    device: "Desktop",
-    os: "macOS",
-    country: "Japan",
-    city: "Tokyo",
-    subscribedAt: "2024-01-03T05:10:00Z",
-    status: "active",
-    lastActive: "2024-01-20T02:30:00Z",
-  },
-  {
-    id: "8",
-    browser: "Chrome",
-    device: "Mobile",
-    os: "Android",
-    country: "Brazil",
-    city: "São Paulo",
-    subscribedAt: "2024-01-01T18:45:00Z",
-    status: "unsubscribed",
-    lastActive: "2024-01-10T12:00:00Z",
-  },
-];
+interface Subscriber {
+  id: string;
+  browser: string | null;
+  device_type: string | null;
+  os: string | null;
+  country: string | null;
+  city: string | null;
+  platform: string | null;
+  created_at: string;
+  last_active_at: string | null;
+  status: string;
+}
 
-const getBrowserIcon = (browser: string) => {
-  switch (browser.toLowerCase()) {
+const getBrowserIcon = (browser: string | null) => {
+  switch (browser?.toLowerCase()) {
     case "chrome":
       return <Chrome className="w-4 h-4" />;
     default:
@@ -127,8 +54,8 @@ const getBrowserIcon = (browser: string) => {
   }
 };
 
-const getDeviceIcon = (device: string) => {
-  switch (device.toLowerCase()) {
+const getDeviceIcon = (device: string | null) => {
+  switch (device?.toLowerCase()) {
     case "mobile":
       return <Smartphone className="w-4 h-4" />;
     case "desktop":
@@ -138,7 +65,8 @@ const getDeviceIcon = (device: string) => {
   }
 };
 
-const formatDate = (dateString: string) => {
+const formatDate = (dateString: string | null) => {
+  if (!dateString) return "N/A";
   return new Date(dateString).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -146,7 +74,8 @@ const formatDate = (dateString: string) => {
   });
 };
 
-const formatTime = (dateString: string) => {
+const formatTime = (dateString: string | null) => {
+  if (!dateString) return "";
   return new Date(dateString).toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -154,19 +83,51 @@ const formatTime = (dateString: string) => {
 };
 
 export default function SubscribersPage() {
+  const { currentWebsite } = useWebsite();
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [deviceFilter, setDeviceFilter] = useState("all");
+  const [testDialogOpen, setTestDialogOpen] = useState(false);
+  const [selectedSubscriber, setSelectedSubscriber] = useState<Subscriber | null>(null);
+
+  const { data: subscribers = [], isLoading } = useQuery({
+    queryKey: ['subscribers', currentWebsite?.id],
+    queryFn: async () => {
+      if (!currentWebsite?.id) return [];
+      const { data, error } = await supabase
+        .from('subscribers')
+        .select('id, browser, device_type, os, country, city, platform, created_at, last_active_at, status')
+        .eq('website_id', currentWebsite.id)
+        .order('created_at', { ascending: false })
+        .limit(100);
+      
+      if (error) throw error;
+      return data as Subscriber[];
+    },
+    enabled: !!currentWebsite?.id,
+  });
 
   const filteredSubscribers = subscribers.filter((sub) => {
     const matchesSearch =
-      sub.country.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      sub.city.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      sub.browser.toLowerCase().includes(searchQuery.toLowerCase());
+      (sub.country?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
+      (sub.city?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
+      (sub.browser?.toLowerCase() || '').includes(searchQuery.toLowerCase());
     const matchesStatus = statusFilter === "all" || sub.status === statusFilter;
-    const matchesDevice = deviceFilter === "all" || sub.device.toLowerCase() === deviceFilter;
+    const matchesDevice = deviceFilter === "all" || sub.device_type?.toLowerCase() === deviceFilter;
     return matchesSearch && matchesStatus && matchesDevice;
   });
+
+  const stats = {
+    total: subscribers.length,
+    active: subscribers.filter(s => s.status === 'active').length,
+    inactive: subscribers.filter(s => s.status === 'inactive').length,
+    unsubscribed: subscribers.filter(s => s.status === 'unsubscribed').length,
+  };
+
+  const handleSendTest = (subscriber: Subscriber) => {
+    setSelectedSubscriber(subscriber);
+    setTestDialogOpen(true);
+  };
 
   return (
     <DashboardLayout>
@@ -225,19 +186,19 @@ export default function SubscribersPage() {
         {/* Stats Row */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="p-4 rounded-lg bg-card border border-border/50">
-            <p className="text-2xl font-bold text-foreground">24,892</p>
+            <p className="text-2xl font-bold text-foreground">{stats.total.toLocaleString()}</p>
             <p className="text-sm text-muted-foreground">Total Subscribers</p>
           </div>
           <div className="p-4 rounded-lg bg-card border border-border/50">
-            <p className="text-2xl font-bold text-success">22,145</p>
+            <p className="text-2xl font-bold text-success">{stats.active.toLocaleString()}</p>
             <p className="text-sm text-muted-foreground">Active</p>
           </div>
           <div className="p-4 rounded-lg bg-card border border-border/50">
-            <p className="text-2xl font-bold text-warning">1,892</p>
+            <p className="text-2xl font-bold text-warning">{stats.inactive.toLocaleString()}</p>
             <p className="text-sm text-muted-foreground">Inactive</p>
           </div>
           <div className="p-4 rounded-lg bg-card border border-border/50">
-            <p className="text-2xl font-bold text-muted-foreground">855</p>
+            <p className="text-2xl font-bold text-muted-foreground">{stats.unsubscribed.toLocaleString()}</p>
             <p className="text-sm text-muted-foreground">Unsubscribed</p>
           </div>
         </div>
@@ -269,77 +230,94 @@ export default function SubscribersPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredSubscribers.map((subscriber) => (
-                  <tr
-                    key={subscriber.id}
-                    className="border-b border-border/50 hover:bg-muted/20 transition-colors"
-                  >
-                    <td className="py-4 px-6">
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center text-primary">
-                            {getDeviceIcon(subscriber.device)}
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              {getBrowserIcon(subscriber.browser)}
-                              <span className="text-sm font-medium text-foreground">
-                                {subscriber.browser}
-                              </span>
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              {subscriber.device} • {subscriber.os}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-4 px-6">
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-4 h-4 text-muted-foreground" />
-                        <div>
-                          <p className="text-sm font-medium text-foreground">{subscriber.city}</p>
-                          <p className="text-xs text-muted-foreground">{subscriber.country}</p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-4 px-6">
-                      <p className="text-sm text-foreground">{formatDate(subscriber.subscribedAt)}</p>
-                      <p className="text-xs text-muted-foreground">{formatTime(subscriber.subscribedAt)}</p>
-                    </td>
-                    <td className="py-4 px-6">
-                      <p className="text-sm text-foreground">{formatDate(subscriber.lastActive)}</p>
-                      <p className="text-xs text-muted-foreground">{formatTime(subscriber.lastActive)}</p>
-                    </td>
-                    <td className="py-4 px-6">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
-                          subscriber.status === "active"
-                            ? "bg-success/10 text-success"
-                            : subscriber.status === "inactive"
-                            ? "bg-warning/10 text-warning"
-                            : "bg-muted text-muted-foreground"
-                        }`}
-                      >
-                        {subscriber.status.charAt(0).toUpperCase() + subscriber.status.slice(1)}
-                      </span>
-                    </td>
-                    <td className="py-4 px-6 text-right">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm">
-                            <MoreHorizontal className="w-4 h-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem>View Details</DropdownMenuItem>
-                          <DropdownMenuItem>Send Notification</DropdownMenuItem>
-                          <DropdownMenuItem className="text-destructive">Remove</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                {isLoading ? (
+                  <tr>
+                    <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                      Loading subscribers...
                     </td>
                   </tr>
-                ))}
+                ) : filteredSubscribers.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                      No subscribers found
+                    </td>
+                  </tr>
+                ) : (
+                  filteredSubscribers.map((subscriber) => (
+                    <tr
+                      key={subscriber.id}
+                      className="border-b border-border/50 hover:bg-muted/20 transition-colors"
+                    >
+                      <td className="py-4 px-6">
+                        <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center text-primary">
+                              {getDeviceIcon(subscriber.device_type)}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                {getBrowserIcon(subscriber.browser)}
+                                <span className="text-sm font-medium text-foreground">
+                                  {subscriber.browser || 'Unknown'}
+                                </span>
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                {subscriber.device_type || 'Unknown'} • {subscriber.os || 'Unknown'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-4 px-6">
+                        <div className="flex items-center gap-2">
+                          <MapPin className="w-4 h-4 text-muted-foreground" />
+                          <div>
+                            <p className="text-sm font-medium text-foreground">{subscriber.city || 'Unknown'}</p>
+                            <p className="text-xs text-muted-foreground">{subscriber.country || 'Unknown'}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-4 px-6">
+                        <p className="text-sm text-foreground">{formatDate(subscriber.created_at)}</p>
+                        <p className="text-xs text-muted-foreground">{formatTime(subscriber.created_at)}</p>
+                      </td>
+                      <td className="py-4 px-6">
+                        <p className="text-sm text-foreground">{formatDate(subscriber.last_active_at)}</p>
+                        <p className="text-xs text-muted-foreground">{formatTime(subscriber.last_active_at)}</p>
+                      </td>
+                      <td className="py-4 px-6">
+                        <span
+                          className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
+                            subscriber.status === "active"
+                              ? "bg-success/10 text-success"
+                              : subscriber.status === "inactive"
+                              ? "bg-warning/10 text-warning"
+                              : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          {subscriber.status.charAt(0).toUpperCase() + subscriber.status.slice(1)}
+                        </span>
+                      </td>
+                      <td className="py-4 px-6 text-right">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon-sm">
+                              <MoreHorizontal className="w-4 h-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem>View Details</DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleSendTest(subscriber)}>
+                              <Send className="w-4 h-4 mr-2" />
+                              Send Test Notification
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="text-destructive">Remove</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -360,6 +338,12 @@ export default function SubscribersPage() {
           </div>
         </div>
       </div>
+
+      <TestNotificationDialog
+        subscriber={selectedSubscriber}
+        open={testDialogOpen}
+        onOpenChange={setTestDialogOpen}
+      />
     </DashboardLayout>
   );
 }
