@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.track-notification]
 verify_jwt = false
+
+[functions.send-test-notification]
+verify_jwt = false
