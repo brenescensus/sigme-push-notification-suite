@@ -3,7 +3,7 @@
  * 
  * Handles sending push notifications via:
  * - Web Push (VAPID) for browsers
- * - FCM for Android (future)
+ * - FCM HTTP v1 API for Android
  * - APNs for iOS (future)
  * 
  * Features:
@@ -21,8 +21,11 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Web Push constants
-const WEB_PUSH_ENDPOINT = 'https://fcm.googleapis.com/fcm/send';
+// FCM HTTP v1 API endpoint template
+const FCM_V1_ENDPOINT = 'https://fcm.googleapis.com/v1/projects/{project_id}/messages:send';
+
+// Cache for FCM access token
+let fcmAccessToken: { token: string; expires: number } | null = null;
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -101,8 +104,8 @@ serve(async (req) => {
 
     console.log(`[SendNotification] Sending to ${subscribers.length} subscribers`);
 
-    // Prepare notification payload
-    const payload = JSON.stringify({
+    // Prepare notification payload for web
+    const webPayload = JSON.stringify({
       title: notification.title,
       body: notification.body,
       icon: notification.icon || '/icon-192x192.png',
@@ -150,10 +153,15 @@ serve(async (req) => {
                 subscriber.auth_key,
                 website.vapid_public_key,
                 website.vapid_private_key,
-                payload
+                webPayload
+              );
+            } else if (subscriber.platform === 'android' && subscriber.fcm_token) {
+              await sendFCMNotification(
+                subscriber.fcm_token,
+                notification
               );
             }
-            // TODO: Add FCM and APNs support here
+            // TODO: Add APNs support for iOS
 
             // Update log to sent
             if (logEntry) {
@@ -243,6 +251,225 @@ serve(async (req) => {
     );
   }
 });
+
+/**
+ * Get FCM access token using service account credentials
+ * Uses OAuth 2.0 with JWT for server-to-server authentication
+ */
+async function getFCMAccessToken(): Promise<string> {
+  // Return cached token if still valid (with 5 min buffer)
+  if (fcmAccessToken && fcmAccessToken.expires > Date.now() + 300000) {
+    return fcmAccessToken.token;
+  }
+
+  const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
+  if (!serviceAccountJson) {
+    throw new Error('FCM_SERVICE_ACCOUNT_JSON not configured');
+  }
+
+  let serviceAccount: any;
+  try {
+    serviceAccount = JSON.parse(serviceAccountJson);
+  } catch {
+    throw new Error('Invalid FCM_SERVICE_ACCOUNT_JSON format');
+  }
+
+  const { client_email, private_key } = serviceAccount;
+  
+  if (!client_email || !private_key) {
+    throw new Error('FCM service account missing client_email or private_key');
+  }
+
+  // Create JWT for OAuth token request
+  const now = Math.floor(Date.now() / 1000);
+  const jwt = await createJWT({
+    iss: client_email,
+    sub: client_email,
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600, // 1 hour
+    scope: 'https://www.googleapis.com/auth/firebase.messaging',
+  }, private_key);
+
+  // Exchange JWT for access token
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt,
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    const error = await tokenResponse.text();
+    console.error('[FCM] Token exchange failed:', error);
+    throw new Error('Failed to get FCM access token');
+  }
+
+  const tokenData = await tokenResponse.json();
+  
+  // Cache the token
+  fcmAccessToken = {
+    token: tokenData.access_token,
+    expires: Date.now() + (tokenData.expires_in * 1000),
+  };
+
+  console.log('[FCM] Access token obtained successfully');
+  return tokenData.access_token;
+}
+
+/**
+ * Create a signed JWT for Google OAuth
+ */
+async function createJWT(payload: Record<string, any>, privateKeyPem: string): Promise<string> {
+  const header = { alg: 'RS256', typ: 'JWT' };
+  
+  // Encode header and payload
+  const encodedHeader = base64UrlEncode(JSON.stringify(header));
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signatureInput = `${encodedHeader}.${encodedPayload}`;
+  
+  // Import private key
+  const privateKey = await importPrivateKey(privateKeyPem);
+  
+  // Sign
+  const signature = await crypto.subtle.sign(
+    { name: 'RSASSA-PKCS1-v1_5' },
+    privateKey,
+    new TextEncoder().encode(signatureInput)
+  );
+  
+  const encodedSignature = base64UrlEncode(new Uint8Array(signature));
+  
+  return `${signatureInput}.${encodedSignature}`;
+}
+
+/**
+ * Import PEM-encoded RSA private key
+ */
+async function importPrivateKey(pem: string): Promise<CryptoKey> {
+  // Remove PEM headers and newlines
+  const pemContents = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/-----BEGIN RSA PRIVATE KEY-----/, '')
+    .replace(/-----END RSA PRIVATE KEY-----/, '')
+    .replace(/\s/g, '');
+  
+  const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
+  
+  return await crypto.subtle.importKey(
+    'pkcs8',
+    binaryDer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+}
+
+/**
+ * Base64 URL encode
+ */
+function base64UrlEncode(data: string | Uint8Array): string {
+  let base64: string;
+  if (typeof data === 'string') {
+    base64 = btoa(data);
+  } else {
+    base64 = btoa(String.fromCharCode(...data));
+  }
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Send FCM notification using HTTP v1 API
+ */
+async function sendFCMNotification(
+  fcmToken: string,
+  notification: {
+    title: string;
+    body: string;
+    icon?: string;
+    image?: string;
+    url?: string;
+    actions?: any[];
+  }
+): Promise<void> {
+  const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
+  if (!serviceAccountJson) {
+    throw new Error('FCM_SERVICE_ACCOUNT_JSON not configured');
+  }
+
+  const serviceAccount = JSON.parse(serviceAccountJson);
+  const projectId = serviceAccount.project_id;
+  
+  if (!projectId) {
+    throw new Error('FCM service account missing project_id');
+  }
+
+  const accessToken = await getFCMAccessToken();
+  const endpoint = FCM_V1_ENDPOINT.replace('{project_id}', projectId);
+
+  // Build FCM v1 message payload
+  const message: any = {
+    message: {
+      token: fcmToken,
+      notification: {
+        title: notification.title,
+        body: notification.body,
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          icon: notification.icon || 'ic_notification',
+          color: '#4285F4',
+          click_action: 'FLUTTER_NOTIFICATION_CLICK',
+          channel_id: 'default_channel',
+        },
+      },
+      data: {
+        url: notification.url || '/',
+        click_action: notification.url || '/',
+      },
+    },
+  };
+
+  // Add image if provided
+  if (notification.image) {
+    message.message.notification.image = notification.image;
+    message.message.android.notification.image = notification.image;
+  }
+
+  console.log('[FCM] Sending notification to token:', fcmToken.substring(0, 20) + '...');
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(message),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error('[FCM] Send failed:', response.status, errorBody);
+    
+    // Check for invalid token errors
+    if (response.status === 404 || 
+        response.status === 400 && errorBody.includes('UNREGISTERED') ||
+        errorBody.includes('INVALID_ARGUMENT')) {
+      throw new Error('SUBSCRIPTION_EXPIRED');
+    }
+    
+    throw new Error(`FCM send failed: ${response.status} ${errorBody}`);
+  }
+
+  const result = await response.json();
+  console.log('[FCM] Notification sent successfully:', result.name);
+}
 
 /**
  * Send Web Push notification
