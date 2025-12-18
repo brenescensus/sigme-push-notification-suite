@@ -1,14 +1,15 @@
 /**
- * CampaignsPage - Enhanced with Device Previews and Recurring Scheduling
+ * CampaignsPage - Database-Connected Campaign Management
  * 
  * Features:
- * - Real-time multi-device notification preview (iOS, Android, macOS, Windows)
+ * - Full CRUD with Supabase database
+ * - Real-time multi-device notification preview
  * - Advanced recurring scheduling support
- * - Owner-exempt limits (unlimited for platform owner)
- * - Fluid, Apple-inspired UI with smooth transitions
+ * - Owner-exempt limits
  */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
   Search,
@@ -26,6 +27,7 @@ import {
   Clock,
   Crown,
   Infinity,
+  Loader2,
 } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
@@ -59,107 +61,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DevicePreviewTabs from "@/components/notifications/DevicePreviewTabs";
 import RecurringScheduler, { ScheduleConfig } from "@/components/scheduling/RecurringScheduler";
 import { useOwnerAccess } from "@/hooks/useOwnerAccess";
+import { useWebsite } from "@/contexts/WebsiteContext";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import type { Tables } from "@/integrations/supabase/types";
 
-interface Campaign {
-  id: string;
-  name: string;
-  title: string;
-  body: string;
-  icon?: string;
-  image?: string;
-  url?: string;
-  status: "draft" | "scheduled" | "active" | "completed" | "paused" | "recurring";
-  sent: number;
-  delivered: number;
-  clicked: number;
-  scheduledAt?: string;
-  createdAt: string;
-  segment: string;
-  isRecurring?: boolean;
-  recurrencePattern?: string;
-}
-
-const campaigns: Campaign[] = [
-  {
-    id: "1",
-    name: "Welcome Series",
-    title: "Welcome to Our App!",
-    body: "Thanks for subscribing. Check out what's new!",
-    status: "completed",
-    sent: 12450,
-    delivered: 12100,
-    clicked: 3420,
-    createdAt: "2024-01-15T10:30:00Z",
-    segment: "New Subscribers",
-  },
-  {
-    id: "2",
-    name: "Flash Sale Alert",
-    title: "🔥 Flash Sale - 50% Off!",
-    body: "Limited time offer. Shop now and save big!",
-    url: "https://example.com/sale",
-    status: "completed",
-    sent: 8900,
-    delivered: 8600,
-    clicked: 2100,
-    createdAt: "2024-01-14T08:15:00Z",
-    segment: "All Subscribers",
-  },
-  {
-    id: "3",
-    name: "Weekly Newsletter",
-    title: "This Week's Top Stories",
-    body: "Catch up on the latest news and updates.",
-    status: "recurring",
-    isRecurring: true,
-    recurrencePattern: "Weekly on Mon",
-    sent: 15200,
-    delivered: 14800,
-    clicked: 4500,
-    createdAt: "2024-01-12T16:45:00Z",
-    segment: "Active Users",
-  },
-  {
-    id: "4",
-    name: "Product Launch",
-    title: "Introducing Our New Feature!",
-    body: "Be the first to try our exciting new update.",
-    status: "scheduled",
-    sent: 0,
-    delivered: 0,
-    clicked: 0,
-    scheduledAt: "2024-01-25T09:00:00Z",
-    createdAt: "2024-01-10T12:00:00Z",
-    segment: "Premium Users",
-  },
-  {
-    id: "5",
-    name: "Re-engagement",
-    title: "We Miss You!",
-    body: "Come back and see what you've been missing.",
-    status: "draft",
-    sent: 0,
-    delivered: 0,
-    clicked: 0,
-    createdAt: "2024-01-08T22:30:00Z",
-    segment: "Inactive Users",
-  },
-  {
-    id: "6",
-    name: "Daily Tips",
-    title: "💡 Your Daily Productivity Tip",
-    body: "Small habits lead to big changes. Here's today's tip.",
-    status: "recurring",
-    isRecurring: true,
-    recurrencePattern: "Daily at 9:00 AM",
-    sent: 45600,
-    delivered: 44200,
-    clicked: 8900,
-    createdAt: "2024-01-05T14:20:00Z",
-    segment: "All Subscribers",
-  },
-];
+type Campaign = Tables<"campaigns">;
 
 const formatDate = (dateString: string) => {
   return new Date(dateString).toLocaleDateString("en-US", {
@@ -171,7 +79,7 @@ const formatDate = (dateString: string) => {
   });
 };
 
-const getStatusColor = (status: Campaign["status"]) => {
+const getStatusColor = (status: string) => {
   switch (status) {
     case "active":
       return "bg-success/10 text-success border-success/20";
@@ -194,9 +102,12 @@ export default function CampaignsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const { isOwner, limits } = useOwnerAccess();
+  const { currentWebsite } = useWebsite();
+  const queryClient = useQueryClient();
   
-  // Form state for new campaign
+  // Form state
   const [campaignName, setCampaignName] = useState("");
   const [notificationTitle, setNotificationTitle] = useState("");
   const [notificationBody, setNotificationBody] = useState("");
@@ -207,12 +118,246 @@ export default function CampaignsPage() {
   const [button1Url, setButton1Url] = useState("");
   const [button2Label, setButton2Label] = useState("");
   const [button2Url, setButton2Url] = useState("");
+  const [segment, setSegment] = useState("all");
+  const [targetBrowsers, setTargetBrowsers] = useState<string[]>([]);
+  const [targetDevices, setTargetDevices] = useState<string[]>([]);
+  const [targetCountries, setTargetCountries] = useState<string[]>([]);
   
-  // Schedule state
   const [scheduleConfig, setScheduleConfig] = useState<ScheduleConfig>({
     type: "immediate",
     timezone: "UTC",
   });
+
+  // Fetch campaigns from database
+  const { data: campaigns = [], isLoading } = useQuery({
+    queryKey: ["campaigns", currentWebsite?.id],
+    queryFn: async () => {
+      if (!currentWebsite?.id) return [];
+      
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .eq("website_id", currentWebsite.id)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!currentWebsite?.id,
+  });
+
+  // Create campaign mutation
+  const createCampaign = useMutation({
+    mutationFn: async (isDraft: boolean) => {
+      if (!currentWebsite?.id) throw new Error("No website selected");
+
+      const actions = [];
+      if (button1Label) actions.push({ label: button1Label, url: button1Url });
+      if (button2Label) actions.push({ label: button2Label, url: button2Url });
+
+      const scheduledAt = scheduleConfig.type === "scheduled" && scheduleConfig.scheduledDate
+        ? scheduleConfig.scheduledDate.toISOString()
+        : null;
+
+      const isRecurring = scheduleConfig.type === "recurring";
+      const recurrencePattern = isRecurring 
+        ? `${scheduleConfig.recurringInterval} at ${scheduleConfig.recurringTime || "09:00"}`
+        : null;
+
+      const status = isDraft 
+        ? "draft" 
+        : scheduleConfig.type === "immediate" 
+          ? "active" 
+          : scheduleConfig.type === "recurring"
+            ? "recurring"
+            : "scheduled";
+
+      const { data, error } = await supabase
+        .from("campaigns")
+        .insert({
+          website_id: currentWebsite.id,
+          name: campaignName,
+          title: notificationTitle,
+          body: notificationBody,
+          icon_url: iconUrl || null,
+          image_url: imageUrl || null,
+          click_url: clickUrl || null,
+          actions: actions,
+          segment: segment,
+          target_browsers: targetBrowsers.length > 0 ? targetBrowsers : null,
+          target_devices: targetDevices.length > 0 ? targetDevices : null,
+          target_countries: targetCountries.length > 0 ? targetCountries : null,
+          status,
+          scheduled_at: scheduledAt,
+          is_recurring: isRecurring,
+          recurrence_pattern: recurrencePattern,
+          recurrence_config: isRecurring ? scheduleConfig : null,
+          next_send_at: isRecurring && scheduleConfig.recurringStartDate 
+            ? scheduleConfig.recurringStartDate.toISOString() 
+            : scheduledAt,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      return { campaign: data, sendNow: scheduleConfig.type === "immediate" && !isDraft };
+    },
+    onSuccess: async ({ campaign, sendNow }) => {
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      resetForm();
+      setIsCreateOpen(false);
+      
+      if (sendNow) {
+        // Trigger immediate send
+        await sendCampaignNow(campaign.id);
+      }
+      
+      toast({
+        title: "Campaign created",
+        description: sendNow ? "Campaign is being sent now" : "Campaign saved successfully",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Update campaign mutation
+  const updateCampaign = useMutation({
+    mutationFn: async ({ id, updates }: { id: string; updates: Partial<Campaign> }) => {
+      const { error } = await supabase
+        .from("campaigns")
+        .update(updates)
+        .eq("id", id);
+
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      toast({ title: "Campaign updated" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Delete campaign mutation
+  const deleteCampaign = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase
+        .from("campaigns")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      toast({ title: "Campaign deleted" });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Send campaign now
+  const sendCampaignNow = async (campaignId: string) => {
+    try {
+      const campaign = campaigns.find(c => c.id === campaignId);
+      if (!campaign || !currentWebsite) return;
+
+      const { data, error } = await supabase.functions.invoke("send-notification", {
+        body: {
+          campaignId,
+          websiteId: currentWebsite.id,
+          notification: {
+            title: campaign.title,
+            body: campaign.body,
+            icon: campaign.icon_url,
+            image: campaign.image_url,
+            url: campaign.click_url,
+            actions: campaign.actions,
+          },
+        },
+      });
+
+      if (error) throw error;
+
+      toast({
+        title: "Campaign sent",
+        description: `Sent to ${data.sent} subscribers`,
+      });
+
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+    } catch (error: any) {
+      toast({
+        title: "Send failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Duplicate campaign
+  const duplicateCampaign = async (campaign: Campaign) => {
+    if (!currentWebsite?.id) return;
+
+    const { error } = await supabase
+      .from("campaigns")
+      .insert({
+        website_id: currentWebsite.id,
+        name: `${campaign.name} (Copy)`,
+        title: campaign.title,
+        body: campaign.body,
+        icon_url: campaign.icon_url,
+        image_url: campaign.image_url,
+        click_url: campaign.click_url,
+        actions: campaign.actions,
+        segment: campaign.segment,
+        target_browsers: campaign.target_browsers,
+        target_devices: campaign.target_devices,
+        target_countries: campaign.target_countries,
+        status: "draft",
+      });
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      toast({ title: "Campaign duplicated" });
+    }
+  };
+
+  const resetForm = () => {
+    setCampaignName("");
+    setNotificationTitle("");
+    setNotificationBody("");
+    setIconUrl("");
+    setImageUrl("");
+    setClickUrl("");
+    setButton1Label("");
+    setButton1Url("");
+    setButton2Label("");
+    setButton2Url("");
+    setSegment("all");
+    setTargetBrowsers([]);
+    setTargetDevices([]);
+    setTargetCountries([]);
+    setScheduleConfig({ type: "immediate", timezone: "UTC" });
+    setEditingCampaign(null);
+  };
 
   const filteredCampaigns = campaigns.filter((campaign) => {
     const matchesSearch =
@@ -222,7 +367,6 @@ export default function CampaignsPage() {
     return matchesSearch && matchesStatus;
   });
 
-  // Build notification content for preview
   const previewContent = {
     title: notificationTitle,
     body: notificationBody,
@@ -235,10 +379,21 @@ export default function CampaignsPage() {
     ],
   };
 
+  if (!currentWebsite) {
+    return (
+      <DashboardLayout>
+        <div className="text-center py-16">
+          <h3 className="text-xl font-semibold mb-2">No website selected</h3>
+          <p className="text-muted-foreground">Please select or create a website first</p>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* Header with Owner Badge */}
+        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-3 mb-2">
@@ -257,7 +412,7 @@ export default function CampaignsPage() {
               )}
             </p>
           </div>
-          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+          <Dialog open={isCreateOpen} onOpenChange={(open) => { setIsCreateOpen(open); if (!open) resetForm(); }}>
             <DialogTrigger asChild>
               <Button variant="hero" className="group">
                 <Plus className="w-4 h-4 mr-2 transition-transform group-hover:rotate-90 duration-300" />
@@ -290,7 +445,6 @@ export default function CampaignsPage() {
                           placeholder="e.g., Welcome Series"
                           value={campaignName}
                           onChange={(e) => setCampaignName(e.target.value)}
-                          className="transition-all focus:ring-2 focus:ring-primary/20"
                         />
                       </div>
 
@@ -301,7 +455,6 @@ export default function CampaignsPage() {
                           placeholder="e.g., Check out our new features!"
                           value={notificationTitle}
                           onChange={(e) => setNotificationTitle(e.target.value)}
-                          className="transition-all focus:ring-2 focus:ring-primary/20"
                         />
                       </div>
 
@@ -313,7 +466,6 @@ export default function CampaignsPage() {
                           rows={3}
                           value={notificationBody}
                           onChange={(e) => setNotificationBody(e.target.value)}
-                          className="transition-all focus:ring-2 focus:ring-primary/20 resize-none"
                         />
                       </div>
 
@@ -356,7 +508,6 @@ export default function CampaignsPage() {
                         />
                       </div>
 
-                      {/* Action Buttons */}
                       <div className="space-y-3">
                         <Label>Action Buttons (optional)</Label>
                         <div className="grid grid-cols-2 gap-3">
@@ -389,7 +540,7 @@ export default function CampaignsPage() {
                     <TabsContent value="targeting" className="space-y-4 mt-4">
                       <div className="space-y-2">
                         <Label>Target Audience</Label>
-                        <Select defaultValue="all">
+                        <Select value={segment} onValueChange={setSegment}>
                           <SelectTrigger>
                             <SelectValue placeholder="Select segment" />
                           </SelectTrigger>
@@ -398,7 +549,6 @@ export default function CampaignsPage() {
                             <SelectItem value="new">New Subscribers (Last 7 days)</SelectItem>
                             <SelectItem value="active">Active Users</SelectItem>
                             <SelectItem value="inactive">Inactive Users</SelectItem>
-                            <SelectItem value="premium">Premium Users</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -455,7 +605,9 @@ export default function CampaignsPage() {
                       <div className="p-4 rounded-xl bg-accent/50 border border-primary/10">
                         <p className="text-sm font-medium text-foreground">Estimated Reach</p>
                         <div className="flex items-baseline gap-2 mt-1">
-                          <p className="text-3xl font-semibold text-primary">24,892</p>
+                          <p className="text-3xl font-semibold text-primary">
+                            {currentWebsite?.subscriberCount || 0}
+                          </p>
                           <span className="text-sm text-muted-foreground">subscribers</span>
                         </div>
                         {isOwner && (
@@ -495,11 +647,25 @@ export default function CampaignsPage() {
               </div>
 
               <DialogFooter className="mt-6 gap-3">
-                <Button variant="outline" onClick={() => setIsCreateOpen(false)}>
+                <Button 
+                  variant="outline" 
+                  onClick={() => createCampaign.mutate(true)}
+                  disabled={createCampaign.isPending || !campaignName || !notificationTitle || !notificationBody}
+                >
+                  {createCampaign.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
                   Save as Draft
                 </Button>
-                <Button variant="hero" className="group">
-                  <Send className="w-4 h-4 mr-2 transition-transform group-hover:translate-x-0.5 duration-200" />
+                <Button 
+                  variant="hero" 
+                  className="group"
+                  onClick={() => createCampaign.mutate(false)}
+                  disabled={createCampaign.isPending || !campaignName || !notificationTitle || !notificationBody}
+                >
+                  {createCampaign.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Send className="w-4 h-4 mr-2 transition-transform group-hover:translate-x-0.5 duration-200" />
+                  )}
                   {scheduleConfig.type === "immediate" ? "Send Now" : "Schedule Campaign"}
                 </Button>
               </DialogFooter>
@@ -515,7 +681,7 @@ export default function CampaignsPage() {
               placeholder="Search campaigns..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 transition-all focus:ring-2 focus:ring-primary/20"
+              className="pl-9"
             />
           </div>
           <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -535,126 +701,162 @@ export default function CampaignsPage() {
           </Select>
         </div>
 
+        {/* Loading State */}
+        {isLoading && (
+          <div className="text-center py-16">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto text-primary" />
+            <p className="text-muted-foreground mt-2">Loading campaigns...</p>
+          </div>
+        )}
+
         {/* Campaigns Grid */}
-        <div className="grid gap-4">
-          {filteredCampaigns.map((campaign, index) => (
-            <div
-              key={campaign.id}
-              className={cn(
-                "p-6 rounded-2xl bg-card border border-border/50",
-                "hover:border-primary/20 hover:shadow-lg",
-                "transition-all duration-500 ease-out",
-                "animate-fade-up opacity-0"
-              )}
-              style={{ animationDelay: `${index * 50}ms`, animationFillMode: "forwards" }}
-            >
-              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                <div className="flex items-start gap-4">
-                  <div className={cn(
-                    "w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0",
-                    "transition-all duration-300",
-                    campaign.isRecurring 
-                      ? "bg-gradient-to-br from-primary/20 to-accent" 
-                      : "gradient-primary"
-                  )}>
-                    <Bell className={cn(
-                      "w-6 h-6",
-                      campaign.isRecurring ? "text-primary" : "text-primary-foreground"
-                    )} />
+        {!isLoading && (
+          <div className="grid gap-4">
+            {filteredCampaigns.map((campaign, index) => (
+              <div
+                key={campaign.id}
+                className={cn(
+                  "p-6 rounded-2xl bg-card border border-border/50",
+                  "hover:border-primary/20 hover:shadow-lg",
+                  "transition-all duration-500 ease-out",
+                  "animate-fade-up opacity-0"
+                )}
+                style={{ animationDelay: `${index * 50}ms`, animationFillMode: "forwards" }}
+              >
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="flex items-start gap-4">
+                    <div className={cn(
+                      "w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0",
+                      "transition-all duration-300",
+                      campaign.is_recurring 
+                        ? "bg-gradient-to-br from-primary/20 to-accent" 
+                        : "gradient-primary"
+                    )}>
+                      <Bell className={cn(
+                        "w-6 h-6",
+                        campaign.is_recurring ? "text-primary" : "text-primary-foreground"
+                      )} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-3 mb-1 flex-wrap">
+                        <h3 className="font-semibold text-foreground truncate">{campaign.name}</h3>
+                        <span className={cn(
+                          "px-2.5 py-1 rounded-full text-xs font-medium border",
+                          getStatusColor(campaign.status)
+                        )}>
+                          {campaign.status === "recurring" ? "🔄 Recurring" : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
+                        </span>
+                      </div>
+                      <p className="text-sm text-muted-foreground truncate">{campaign.title}</p>
+                      <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground flex-wrap">
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {formatDate(campaign.created_at)}
+                        </span>
+                        <span>•</span>
+                        <span>{campaign.segment || "All Subscribers"}</span>
+                        {campaign.recurrence_pattern && (
+                          <>
+                            <span>•</span>
+                            <span className="text-primary font-medium">{campaign.recurrence_pattern}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-3 mb-1 flex-wrap">
-                      <h3 className="font-semibold text-foreground truncate">{campaign.name}</h3>
-                      <span className={cn(
-                        "px-2.5 py-1 rounded-full text-xs font-medium border",
-                        getStatusColor(campaign.status)
-                      )}>
-                        {campaign.status === "recurring" ? "🔄 Recurring" : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
-                      </span>
-                    </div>
-                    <p className="text-sm text-muted-foreground truncate">{campaign.title}</p>
-                    <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground flex-wrap">
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {formatDate(campaign.createdAt)}
-                      </span>
-                      <span>•</span>
-                      <span>{campaign.segment}</span>
-                      {campaign.recurrencePattern && (
-                        <>
-                          <span>•</span>
-                          <span className="text-primary font-medium">{campaign.recurrencePattern}</span>
-                        </>
-                      )}
-                    </div>
+
+                  <div className="flex items-center gap-6">
+                    {campaign.sent_count > 0 && (
+                      <div className="grid grid-cols-3 gap-6 text-center">
+                        <div className="group">
+                          <p className="text-lg font-semibold text-foreground group-hover:text-primary transition-colors">
+                            {campaign.sent_count.toLocaleString()}
+                          </p>
+                          <p className="text-xs text-muted-foreground">Sent</p>
+                        </div>
+                        <div className="group">
+                          <p className="text-lg font-semibold text-foreground group-hover:text-primary transition-colors">
+                            {campaign.delivered_count.toLocaleString()}
+                          </p>
+                          <p className="text-xs text-muted-foreground">Delivered</p>
+                        </div>
+                        <div className="group">
+                          <p className="text-lg font-semibold text-primary">
+                            {campaign.sent_count > 0 
+                              ? ((campaign.clicked_count / campaign.sent_count) * 100).toFixed(1) 
+                              : 0}%
+                          </p>
+                          <p className="text-xs text-muted-foreground">CTR</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="hover:bg-accent">
+                          <MoreHorizontal className="w-5 h-5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-48">
+                        {campaign.status === "draft" && (
+                          <DropdownMenuItem 
+                            className="cursor-pointer"
+                            onClick={() => sendCampaignNow(campaign.id)}
+                          >
+                            <Send className="w-4 h-4 mr-2" />
+                            Send Now
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuItem className="cursor-pointer">
+                          <Edit className="w-4 h-4 mr-2" />
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem 
+                          className="cursor-pointer"
+                          onClick={() => duplicateCampaign(campaign)}
+                        >
+                          <Copy className="w-4 h-4 mr-2" />
+                          Duplicate
+                        </DropdownMenuItem>
+                        {campaign.status === "active" && (
+                          <DropdownMenuItem 
+                            className="cursor-pointer"
+                            onClick={() => updateCampaign.mutate({ id: campaign.id, updates: { status: "paused" } })}
+                          >
+                            <Pause className="w-4 h-4 mr-2" />
+                            Pause
+                          </DropdownMenuItem>
+                        )}
+                        {(campaign.status === "paused" || campaign.status === "recurring") && (
+                          <DropdownMenuItem 
+                            className="cursor-pointer"
+                            onClick={() => campaign.status === "recurring" 
+                              ? sendCampaignNow(campaign.id)
+                              : updateCampaign.mutate({ id: campaign.id, updates: { status: "active" } })
+                            }
+                          >
+                            <Play className="w-4 h-4 mr-2" />
+                            {campaign.status === "recurring" ? "Run Now" : "Resume"}
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem 
+                          className="text-destructive cursor-pointer focus:text-destructive"
+                          onClick={() => deleteCampaign.mutate(campaign.id)}
+                        >
+                          <Trash2 className="w-4 h-4 mr-2" />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
-                </div>
-
-                <div className="flex items-center gap-6">
-                  {campaign.sent > 0 && (
-                    <div className="grid grid-cols-3 gap-6 text-center">
-                      <div className="group">
-                        <p className="text-lg font-semibold text-foreground group-hover:text-primary transition-colors">
-                          {campaign.sent.toLocaleString()}
-                        </p>
-                        <p className="text-xs text-muted-foreground">Sent</p>
-                      </div>
-                      <div className="group">
-                        <p className="text-lg font-semibold text-foreground group-hover:text-primary transition-colors">
-                          {campaign.delivered.toLocaleString()}
-                        </p>
-                        <p className="text-xs text-muted-foreground">Delivered</p>
-                      </div>
-                      <div className="group">
-                        <p className="text-lg font-semibold text-primary">
-                          {((campaign.clicked / campaign.sent) * 100).toFixed(1)}%
-                        </p>
-                        <p className="text-xs text-muted-foreground">CTR</p>
-                      </div>
-                    </div>
-                  )}
-
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" className="hover:bg-accent">
-                        <MoreHorizontal className="w-5 h-5" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-48">
-                      <DropdownMenuItem className="cursor-pointer">
-                        <Edit className="w-4 h-4 mr-2" />
-                        Edit
-                      </DropdownMenuItem>
-                      <DropdownMenuItem className="cursor-pointer">
-                        <Copy className="w-4 h-4 mr-2" />
-                        Duplicate
-                      </DropdownMenuItem>
-                      {campaign.status === "active" && (
-                        <DropdownMenuItem className="cursor-pointer">
-                          <Pause className="w-4 h-4 mr-2" />
-                          Pause
-                        </DropdownMenuItem>
-                      )}
-                      {(campaign.status === "paused" || campaign.status === "recurring") && (
-                        <DropdownMenuItem className="cursor-pointer">
-                          <Play className="w-4 h-4 mr-2" />
-                          {campaign.status === "recurring" ? "Run Now" : "Resume"}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem className="text-destructive cursor-pointer focus:text-destructive">
-                        <Trash2 className="w-4 h-4 mr-2" />
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
-        {filteredCampaigns.length === 0 && (
+        {!isLoading && filteredCampaigns.length === 0 && (
           <div className="text-center py-16 animate-fade-in">
             <div className="w-20 h-20 mx-auto mb-6 rounded-3xl bg-accent/50 flex items-center justify-center">
               <Bell className="w-10 h-10 text-muted-foreground" />

@@ -1,5 +1,8 @@
 project_id = "cshoskwtvjhlwgxntjzs"
 
+[functions.process-scheduled-campaigns]
+verify_jwt = false
+
 [functions.register-subscriber]
 verify_jwt = false
 
