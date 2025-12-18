@@ -2,7 +2,7 @@
  * Website Integration Page
  * 
  * Shows integration code, service worker, and setup instructions
- * for an existing website.
+ * with actual Supabase endpoints.
  */
 
 import { useParams, Link } from "react-router-dom";
@@ -18,6 +18,8 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 
 export default function WebsiteIntegrationPage() {
   const { websiteId } = useParams();
@@ -50,7 +52,7 @@ export default function WebsiteIntegrationPage() {
     );
   }
 
-  // Generate service worker code
+  // Generate service worker code with actual Supabase endpoints
   const serviceWorkerCode = `// Sigme Push Notification Service Worker
 // Website: ${website.name}
 // Generated: ${new Date().toISOString()}
@@ -58,7 +60,7 @@ export default function WebsiteIntegrationPage() {
 const SIGME_CONFIG = {
   websiteId: '${website.id}',
   vapidPublicKey: '${website.vapidPublicKey}',
-  apiEndpoint: 'https://api.sigme.io/v1'
+  apiEndpoint: '${SUPABASE_URL}/functions/v1'
 };
 
 // Handle push events
@@ -95,12 +97,13 @@ self.addEventListener('push', function(event) {
 
   // Track delivery
   if (data.notificationId) {
-    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track/delivered\`, {
+    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         websiteId: SIGME_CONFIG.websiteId,
-        notificationId: data.notificationId
+        notificationId: data.notificationId,
+        event: 'delivered'
       })
     }).catch(() => {});
   }
@@ -115,12 +118,13 @@ self.addEventListener('notificationclick', function(event) {
   
   // Track click
   if (data.notificationId) {
-    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track/clicked\`, {
+    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         websiteId: SIGME_CONFIG.websiteId,
         notificationId: data.notificationId,
+        event: 'clicked',
         action: event.action || 'default'
       })
     }).catch(() => {});
@@ -148,19 +152,20 @@ self.addEventListener('notificationclose', function(event) {
   const data = event.notification.data || {};
   
   if (data.notificationId) {
-    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track/dismissed\`, {
+    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         websiteId: SIGME_CONFIG.websiteId,
-        notificationId: data.notificationId
+        notificationId: data.notificationId,
+        event: 'dismissed'
       })
     }).catch(() => {});
   }
 });
 `;
 
-  // Integration script
+  // Integration script with actual Supabase endpoints
   const integrationScript = `<!-- Sigme Push Notifications -->
 <!-- Add this before </body> on your website -->
 <script>
@@ -168,7 +173,7 @@ self.addEventListener('notificationclose', function(event) {
   const SIGME_CONFIG = {
     websiteId: '${website.id}',
     vapidPublicKey: '${website.vapidPublicKey}',
-    apiEndpoint: 'https://api.sigme.io/v1',
+    apiEndpoint: '${SUPABASE_URL}/functions/v1',
     serviceWorkerPath: '/sigme-sw.js'
   };
 
@@ -196,13 +201,43 @@ self.addEventListener('notificationclose', function(event) {
     .then(function(subscription) {
       if (!subscription) return;
       
-      return fetch(SIGME_CONFIG.apiEndpoint + '/subscribers', {
+      // Parse browser info
+      const ua = navigator.userAgent;
+      let browser = 'Other';
+      let browserVersion = '';
+      if (ua.includes('Chrome')) { browser = 'Chrome'; browserVersion = ua.match(/Chrome\\/([\\d.]+)/)?.[1] || ''; }
+      else if (ua.includes('Firefox')) { browser = 'Firefox'; browserVersion = ua.match(/Firefox\\/([\\d.]+)/)?.[1] || ''; }
+      else if (ua.includes('Safari')) { browser = 'Safari'; browserVersion = ua.match(/Version\\/([\\d.]+)/)?.[1] || ''; }
+      else if (ua.includes('Edge')) { browser = 'Edge'; browserVersion = ua.match(/Edg\\/([\\d.]+)/)?.[1] || ''; }
+
+      // Detect device type
+      let deviceType = 'desktop';
+      if (/Mobi|Android/i.test(ua)) deviceType = 'mobile';
+      else if (/Tablet|iPad/i.test(ua)) deviceType = 'tablet';
+
+      // Detect OS
+      let os = 'Unknown';
+      if (ua.includes('Win')) os = 'Windows';
+      else if (ua.includes('Mac')) os = 'macOS';
+      else if (ua.includes('Linux')) os = 'Linux';
+      else if (ua.includes('Android')) os = 'Android';
+      else if (ua.includes('iOS') || ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
+
+      const subJson = subscription.toJSON();
+      
+      return fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           websiteId: SIGME_CONFIG.websiteId,
-          subscription: subscription,
-          userAgent: navigator.userAgent,
+          endpoint: subJson.endpoint,
+          p256dh: subJson.keys.p256dh,
+          auth: subJson.keys.auth,
+          browser: browser,
+          browserVersion: browserVersion,
+          deviceType: deviceType,
+          os: os,
+          platform: 'web',
           language: navigator.language,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
         })
@@ -408,6 +443,16 @@ self.addEventListener('notificationclose', function(event) {
                   </Button>
                 </div>
                 <p className="text-xs text-destructive mt-2">This token provides full API access. Keep it secure.</p>
+              </div>
+
+              <div className="p-4 rounded-lg bg-muted/50">
+                <Label className="text-xs text-muted-foreground">API Endpoint</Label>
+                <div className="flex items-center gap-2 mt-1">
+                  <code className="flex-1 font-mono text-sm">{SUPABASE_URL}/functions/v1</code>
+                  <Button variant="ghost" size="icon-sm" onClick={() => copyToClipboard(`${SUPABASE_URL}/functions/v1`, "API Endpoint")}>
+                    <Copy className="w-4 h-4" />
+                  </Button>
+                </div>
               </div>
             </div>
           </TabsContent>
