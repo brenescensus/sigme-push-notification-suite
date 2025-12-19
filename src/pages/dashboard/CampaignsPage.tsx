@@ -155,13 +155,14 @@ export default function CampaignsPage() {
       if (button1Label) actions.push({ label: button1Label, url: button1Url });
       if (button2Label) actions.push({ label: button2Label, url: button2Url });
 
-      const scheduledAt = scheduleConfig.type === "scheduled" && scheduleConfig.scheduledDate
-        ? scheduleConfig.scheduledDate.toISOString()
+      // Build scheduled date from date + time strings
+      const scheduledAt = scheduleConfig.type === "scheduled" && scheduleConfig.date
+        ? new Date(`${scheduleConfig.date}T${scheduleConfig.time || "09:00"}`).toISOString()
         : null;
 
       const isRecurring = scheduleConfig.type === "recurring";
-      const recurrencePattern = isRecurring 
-        ? `${scheduleConfig.recurringInterval} at ${scheduleConfig.recurringTime || "09:00"}`
+      const recurrencePattern = isRecurring && scheduleConfig.recurrence
+        ? `${scheduleConfig.recurrence.pattern} every ${scheduleConfig.recurrence.interval}`
         : null;
 
       const status = isDraft 
@@ -172,9 +173,14 @@ export default function CampaignsPage() {
             ? "recurring"
             : "scheduled";
 
+      // Calculate next_send_at for recurring campaigns
+      const nextSendAt = isRecurring && scheduleConfig.date
+        ? new Date(`${scheduleConfig.date}T${scheduleConfig.time || "09:00"}`).toISOString()
+        : scheduledAt;
+
       const { data, error } = await supabase
         .from("campaigns")
-        .insert({
+        .insert([{
           website_id: currentWebsite.id,
           name: campaignName,
           title: notificationTitle,
@@ -191,11 +197,9 @@ export default function CampaignsPage() {
           scheduled_at: scheduledAt,
           is_recurring: isRecurring,
           recurrence_pattern: recurrencePattern,
-          recurrence_config: isRecurring ? scheduleConfig : null,
-          next_send_at: isRecurring && scheduleConfig.recurringStartDate 
-            ? scheduleConfig.recurringStartDate.toISOString() 
-            : scheduledAt,
-        })
+          recurrence_config: isRecurring ? JSON.parse(JSON.stringify(scheduleConfig)) : null,
+          next_send_at: nextSendAt,
+        }])
         .select()
         .single();
 
