@@ -380,6 +380,8 @@ async function sendWebPushNotification(
 
 /**
  * Create VAPID JWT token for Web Push authorization (RFC 8292)
+ * 
+ * The private key should be a 32-byte raw P-256 private key in base64url format.
  */
 async function createVapidJwt(
   audience: string, 
@@ -403,7 +405,7 @@ async function createVapidJwt(
   const payloadB64 = base64UrlEncode(JSON.stringify(payload));
   const signingInput = `${headerB64}.${payloadB64}`;
 
-  // Import the private key
+  // Import the private key (raw 32-byte P-256 private key)
   const privateKey = await importVapidPrivateKey(privateKeyBase64);
 
   // Sign the JWT
@@ -413,7 +415,7 @@ async function createVapidJwt(
     new TextEncoder().encode(signingInput)
   );
 
-  // Convert signature from DER to raw format if needed and base64url encode
+  // Convert signature to base64url
   const signatureB64 = base64UrlEncode(new Uint8Array(signature));
 
   return `${signingInput}.${signatureB64}`;
@@ -421,74 +423,75 @@ async function createVapidJwt(
 
 /**
  * Import VAPID private key from base64url format
+ * 
+ * VAPID private keys are raw 32-byte P-256 scalars in base64url encoding.
+ * We need to construct a JWK to import them with Web Crypto API.
  */
 async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKey> {
-  // Decode base64url private key
+  // Decode base64url private key (should be 32 bytes for P-256 or longer for PKCS8)
   const privateKeyBytes = base64UrlDecode(privateKeyBase64);
   
-  // For P-256, private key should be 32 bytes
-  // We need to construct a proper PKCS8 or JWK format
-  const jwk = {
-    kty: 'EC',
-    crv: 'P-256',
-    d: privateKeyBase64,
-    // For signing we only need d, but crypto.subtle may need x,y
-    // We'll use raw key import if JWK fails
-    x: '', // Will be computed
-    y: '', // Will be computed
-  };
+  // Check if this is a PKCS8 formatted key (longer) or raw 32-byte key
+  if (privateKeyBytes.length > 32) {
+    // This is likely PKCS8 format from our key generator
+    try {
+      // Create a new ArrayBuffer to ensure correct type
+      const keyBuffer = new ArrayBuffer(privateKeyBytes.length);
+      const keyView = new Uint8Array(keyBuffer);
+      keyView.set(privateKeyBytes);
+      
+      return await crypto.subtle.importKey(
+        'pkcs8',
+        keyBuffer,
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['sign']
+      );
+    } catch (e) {
+      console.error('[VAPID] PKCS8 import failed:', e);
+      throw new Error('Failed to import VAPID private key (PKCS8 format)');
+    }
+  }
+  
+  // For raw 32-byte keys, we need to construct a PKCS8 wrapper
+  // PKCS8 structure for P-256:
+  // SEQUENCE {
+  //   INTEGER 0 (version)
+  //   SEQUENCE { OID ecPublicKey, OID prime256v1 }
+  //   OCTET STRING { ECPrivateKey }
+  // }
+  const pkcs8Header = new Uint8Array([
+    0x30, 0x41, // SEQUENCE, 65 bytes
+    0x02, 0x01, 0x00, // INTEGER 0 (version)
+    0x30, 0x13, // SEQUENCE, 19 bytes (algorithm identifier)
+    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // OID 1.2.840.10045.2.1 (ecPublicKey)
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, // OID 1.2.840.10045.3.1.7 (prime256v1)
+    0x04, 0x27, // OCTET STRING, 39 bytes
+    0x30, 0x25, // SEQUENCE, 37 bytes (ECPrivateKey)
+    0x02, 0x01, 0x01, // INTEGER 1 (version)
+    0x04, 0x20, // OCTET STRING, 32 bytes (private key)
+  ]);
+
+  const pkcs8Key = new Uint8Array(pkcs8Header.length + 32);
+  pkcs8Key.set(pkcs8Header);
+  pkcs8Key.set(privateKeyBytes.slice(0, 32), pkcs8Header.length);
 
   try {
-    // Try importing as raw private key by constructing JWK
-    // First, derive the public key point from the private key
-    // This is complex, so we'll use a simpler approach
+    // Create a new ArrayBuffer to ensure correct type
+    const keyBuffer = new ArrayBuffer(pkcs8Key.length);
+    const keyView = new Uint8Array(keyBuffer);
+    keyView.set(pkcs8Key);
     
-    // Construct PKCS8 format for EC private key
-    const pkcs8Header = new Uint8Array([
-      0x30, 0x81, 0x87, // SEQUENCE
-      0x02, 0x01, 0x00, // INTEGER 0 (version)
-      0x30, 0x13,       // SEQUENCE (algorithm identifier)
-      0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // OID ecPublicKey
-      0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, // OID prime256v1
-      0x04, 0x6d,       // OCTET STRING
-      0x30, 0x6b,       // SEQUENCE (ECPrivateKey)
-      0x02, 0x01, 0x01, // INTEGER 1 (version)
-      0x04, 0x20,       // OCTET STRING (32 bytes for private key)
-    ]);
-
-    const pkcs8Suffix = new Uint8Array([
-      0xa1, 0x44, 0x03, 0x42, 0x00, // [1] BIT STRING (public key - 65 bytes uncompressed)
-    ]);
-
-    // For now, use a simplified approach - just sign with the private key bytes
-    // This works for most VAPID implementations
-    const keyData = new Uint8Array(pkcs8Header.length + 32);
-    keyData.set(pkcs8Header);
-    keyData.set(privateKeyBytes.slice(0, 32), pkcs8Header.length);
-
     return await crypto.subtle.importKey(
       'pkcs8',
-      keyData,
+      keyBuffer,
       { name: 'ECDSA', namedCurve: 'P-256' },
       false,
       ['sign']
     );
   } catch (e) {
-    console.error('[VAPID] Key import error, trying raw format:', e);
-    
-    // Fallback: try importing with just the raw key using JWK
-    // Generate a dummy public key (not ideal but works for signing)
-    const rawPrivateKey = await crypto.subtle.importKey(
-      'raw',
-      privateKeyBytes,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['sign']
-    ).catch(() => {
-      throw new Error('Failed to import VAPID private key');
-    });
-    
-    return rawPrivateKey;
+    console.error('[VAPID] Key import error:', e);
+    throw new Error('Failed to import VAPID private key');
   }
 }
 
