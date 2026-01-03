@@ -166,6 +166,7 @@ self.addEventListener('notificationclose', function(event) {
 `;
 
   // Integration script with actual Supabase endpoints
+  // FIXED: Uses correct subscription object format expected by register-subscriber
   const integrationScript = `<!-- Sigme Push Notifications -->
 <!-- Add this before </body> on your website -->
 <script>
@@ -177,38 +178,83 @@ self.addEventListener('notificationclose', function(event) {
     serviceWorkerPath: '/sigme-sw.js'
   };
 
+  // Check browser support
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    console.warn('[Sigme] Push notifications not supported');
+    console.warn('[Sigme] Push notifications not supported in this browser');
+    return;
+  }
+
+  // Validate VAPID key format
+  if (!SIGME_CONFIG.vapidPublicKey || !SIGME_CONFIG.vapidPublicKey.startsWith('B')) {
+    console.error('[Sigme] Invalid VAPID public key - must start with B');
     return;
   }
 
   navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath)
     .then(function(registration) {
-      console.log('[Sigme] Service Worker registered');
+      console.log('[Sigme] Service Worker registered:', registration.scope);
       
-      return Notification.requestPermission().then(function(permission) {
-        if (permission !== 'granted') {
-          console.log('[Sigme] Notification permission denied');
-          return;
+      // Check existing subscription first
+      return registration.pushManager.getSubscription().then(function(existingSub) {
+        if (existingSub) {
+          console.log('[Sigme] Existing subscription found');
+          return existingSub;
         }
         
-        return registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey)
+        // Request permission
+        return Notification.requestPermission().then(function(permission) {
+          if (permission !== 'granted') {
+            console.log('[Sigme] Notification permission denied');
+            return null;
+          }
+          
+          console.log('[Sigme] Permission granted, subscribing...');
+          
+          // Subscribe with VAPID key
+          return registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey)
+          });
         });
       });
     })
     .then(function(subscription) {
-      if (!subscription) return;
+      if (!subscription) {
+        console.log('[Sigme] No subscription created');
+        return;
+      }
       
+      console.log('[Sigme] Push subscription created:', subscription.endpoint);
+      
+      // Get subscription as JSON (includes endpoint and keys)
+      const subJson = subscription.toJSON();
+      
+      // Validate subscription has required keys
+      if (!subJson.keys || !subJson.keys.p256dh || !subJson.keys.auth) {
+        console.error('[Sigme] Subscription missing required keys');
+        return;
+      }
+
       // Parse browser info
       const ua = navigator.userAgent;
       let browser = 'Other';
       let browserVersion = '';
-      if (ua.includes('Chrome')) { browser = 'Chrome'; browserVersion = ua.match(/Chrome\\/([\\d.]+)/)?.[1] || ''; }
-      else if (ua.includes('Firefox')) { browser = 'Firefox'; browserVersion = ua.match(/Firefox\\/([\\d.]+)/)?.[1] || ''; }
-      else if (ua.includes('Safari')) { browser = 'Safari'; browserVersion = ua.match(/Version\\/([\\d.]+)/)?.[1] || ''; }
-      else if (ua.includes('Edge')) { browser = 'Edge'; browserVersion = ua.match(/Edg\\/([\\d.]+)/)?.[1] || ''; }
+      if (ua.includes('Chrome') && !ua.includes('Edg')) { 
+        browser = 'Chrome'; 
+        browserVersion = (ua.match(/Chrome\\/([\\d.]+)/) || [])[1] || ''; 
+      }
+      else if (ua.includes('Firefox')) { 
+        browser = 'Firefox'; 
+        browserVersion = (ua.match(/Firefox\\/([\\d.]+)/) || [])[1] || ''; 
+      }
+      else if (ua.includes('Safari') && !ua.includes('Chrome')) { 
+        browser = 'Safari'; 
+        browserVersion = (ua.match(/Version\\/([\\d.]+)/) || [])[1] || ''; 
+      }
+      else if (ua.includes('Edg')) { 
+        browser = 'Edge'; 
+        browserVersion = (ua.match(/Edg\\/([\\d.]+)/) || [])[1] || ''; 
+      }
 
       // Detect device type
       let deviceType = 'desktop';
@@ -219,25 +265,25 @@ self.addEventListener('notificationclose', function(event) {
       let os = 'Unknown';
       if (ua.includes('Win')) os = 'Windows';
       else if (ua.includes('Mac')) os = 'macOS';
-      else if (ua.includes('Linux')) os = 'Linux';
+      else if (ua.includes('Linux') && !ua.includes('Android')) os = 'Linux';
       else if (ua.includes('Android')) os = 'Android';
-      else if (ua.includes('iOS') || ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
+      else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
 
-      const subJson = subscription.toJSON();
-      
+      // Register with Sigme backend using correct format
+      // IMPORTANT: subscription object must have nested keys structure
       return fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           websiteId: SIGME_CONFIG.websiteId,
-          endpoint: subJson.endpoint,
-          p256dh: subJson.keys.p256dh,
-          auth: subJson.keys.auth,
-          browser: browser,
-          browserVersion: browserVersion,
-          deviceType: deviceType,
-          os: os,
-          platform: 'web',
+          subscription: {
+            endpoint: subJson.endpoint,
+            keys: {
+              p256dh: subJson.keys.p256dh,
+              auth: subJson.keys.auth
+            }
+          },
+          userAgent: ua,
           language: navigator.language,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
         })
@@ -245,13 +291,20 @@ self.addEventListener('notificationclose', function(event) {
     })
     .then(function(response) {
       if (response && response.ok) {
-        console.log('[Sigme] Subscriber registered successfully');
+        return response.json().then(function(data) {
+          console.log('[Sigme] Subscriber registered:', data.subscriberId);
+        });
+      } else if (response) {
+        return response.json().then(function(error) {
+          console.error('[Sigme] Registration failed:', error);
+        });
       }
     })
     .catch(function(error) {
       console.error('[Sigme] Error:', error);
     });
 
+  // Convert VAPID key to Uint8Array for PushManager
   function urlBase64ToUint8Array(base64String) {
     const padding = '='.repeat((4 - base64String.length % 4) % 4);
     const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
