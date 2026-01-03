@@ -297,11 +297,14 @@ export type Database = {
           billing_cycle_start: string
           created_at: string
           current_notifications_this_month: number
+          current_recurring_notifications: number
           id: string
           max_notifications_per_month: number
+          max_recurring_notifications: number
           max_subscribers_per_website: number
           max_websites: number
           plan: string
+          plan_price_cents: number
           updated_at: string
           user_id: string
         }
@@ -309,11 +312,14 @@ export type Database = {
           billing_cycle_start?: string
           created_at?: string
           current_notifications_this_month?: number
+          current_recurring_notifications?: number
           id?: string
           max_notifications_per_month?: number
+          max_recurring_notifications?: number
           max_subscribers_per_website?: number
           max_websites?: number
           plan?: string
+          plan_price_cents?: number
           updated_at?: string
           user_id: string
         }
@@ -321,11 +327,14 @@ export type Database = {
           billing_cycle_start?: string
           created_at?: string
           current_notifications_this_month?: number
+          current_recurring_notifications?: number
           id?: string
           max_notifications_per_month?: number
+          max_recurring_notifications?: number
           max_subscribers_per_website?: number
           max_websites?: number
           plan?: string
+          plan_price_cents?: number
           updated_at?: string
           user_id?: string
         }
@@ -408,6 +417,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      can_create_recurring_notification: {
+        Args: { _user_id: string }
+        Returns: boolean
+      }
+      get_recurring_notification_count: {
+        Args: { _user_id: string }
+        Returns: number
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
