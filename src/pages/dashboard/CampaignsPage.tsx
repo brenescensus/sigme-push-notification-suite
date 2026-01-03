@@ -6,6 +6,13 @@
  * - Real-time multi-device notification preview
  * - Advanced recurring scheduling support
  * - Owner-exempt limits
+ * - Billing enforcement for recurring notifications
+ * 
+ * BILLING TIERS:
+ * - Free: 0 recurring notifications
+ * - Starter ($10/mo): 10 recurring notifications
+ * - Growth ($20/mo): 30 recurring notifications
+ * - Owner: Unlimited (superadmin bypass)
  */
 
 import { useState, useEffect } from "react";
@@ -26,8 +33,10 @@ import {
   Pause,
   Clock,
   Crown,
-  Infinity,
+  Infinity as InfinityIcon,
   Loader2,
+  AlertTriangle,
+  Zap,
 } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
@@ -57,9 +66,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DevicePreviewTabs from "@/components/notifications/DevicePreviewTabs";
 import RecurringScheduler, { ScheduleConfig } from "@/components/scheduling/RecurringScheduler";
+import { PricingDialog } from "@/components/billing/PricingDialog";
 import { useOwnerAccess } from "@/hooks/useOwnerAccess";
 import { useWebsite } from "@/contexts/WebsiteContext";
 import { supabase } from "@/integrations/supabase/client";
@@ -103,7 +118,14 @@ export default function CampaignsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
-  const { isOwner, limits } = useOwnerAccess();
+  const [showPricingDialog, setShowPricingDialog] = useState(false);
+  const { 
+    isOwner, 
+    limits, 
+    canCreateRecurringNotification,
+    recurringNotificationsRemaining,
+    refetchLimits,
+  } = useOwnerAccess();
   const { currentWebsite } = useWebsite();
   const queryClient = useQueryClient();
   
@@ -151,6 +173,14 @@ export default function CampaignsPage() {
     mutationFn: async (isDraft: boolean) => {
       if (!currentWebsite?.id) throw new Error("No website selected");
 
+      const isRecurring = scheduleConfig.type === "recurring";
+      
+      // BILLING CHECK: Block recurring notifications if user doesn't have access
+      // Owners bypass all limits (superadmin)
+      if (isRecurring && !isDraft && !isOwner && !canCreateRecurringNotification) {
+        throw new Error("BILLING_LIMIT_EXCEEDED");
+      }
+
       const actions = [];
       if (button1Label) actions.push({ label: button1Label, url: button1Url });
       if (button2Label) actions.push({ label: button2Label, url: button2Url });
@@ -160,7 +190,6 @@ export default function CampaignsPage() {
         ? new Date(`${scheduleConfig.date}T${scheduleConfig.time || "09:00"}`).toISOString()
         : null;
 
-      const isRecurring = scheduleConfig.type === "recurring";
       const recurrencePattern = isRecurring && scheduleConfig.recurrence
         ? `${scheduleConfig.recurrence.pattern} every ${scheduleConfig.recurrence.interval}`
         : null;
@@ -204,6 +233,12 @@ export default function CampaignsPage() {
         .single();
 
       if (error) throw error;
+      
+      // Refetch limits after creating a recurring campaign
+      if (isRecurring && !isDraft) {
+        refetchLimits();
+      }
+      
       return { campaign: data, sendNow: scheduleConfig.type === "immediate" && !isDraft };
     },
     onSuccess: async ({ campaign, sendNow }) => {
@@ -222,6 +257,12 @@ export default function CampaignsPage() {
       });
     },
     onError: (error: Error) => {
+      // Show pricing dialog for billing limit errors
+      if (error.message === "BILLING_LIMIT_EXCEEDED") {
+        setShowPricingDialog(true);
+        return;
+      }
+      
       toast({
         title: "Error",
         description: error.message,
@@ -405,14 +446,26 @@ export default function CampaignsPage() {
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gradient-to-r from-amber-500/10 to-orange-500/10 border border-amber-500/20">
                   <Crown className="w-3.5 h-3.5 text-amber-500" />
                   <span className="text-xs font-medium text-amber-600">Owner</span>
-                  <Infinity className="w-3 h-3 text-amber-500" />
+                  <InfinityIcon className="w-3 h-3 text-amber-500" />
+                </div>
+              )}
+              {!isOwner && limits.plan !== "free" && (
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary/10 border border-primary/20">
+                  <Zap className="w-3.5 h-3.5 text-primary" />
+                  <span className="text-xs font-medium text-primary capitalize">{limits.plan}</span>
                 </div>
               )}
             </div>
             <p className="text-muted-foreground">
               Create, schedule, and manage your push notification campaigns
-              {isOwner && (
+              {isOwner ? (
                 <span className="text-primary font-medium"> • Unlimited access</span>
+              ) : (
+                <span className="text-muted-foreground">
+                  {" "}• {!Number.isFinite(recurringNotificationsRemaining)
+                    ? "Unlimited recurring" 
+                    : `${recurringNotificationsRemaining} recurring left`}
+                </span>
               )}
             </p>
           </div>
@@ -616,7 +669,7 @@ export default function CampaignsPage() {
                         </div>
                         {isOwner && (
                           <p className="text-xs text-primary mt-2 flex items-center gap-1">
-                            <Infinity className="w-3 h-3" />
+                            <InfinityIcon className="w-3 h-3" />
                             No subscriber limits applied
                           </p>
                         )}
@@ -878,6 +931,15 @@ export default function CampaignsPage() {
           </div>
         )}
       </div>
+
+      {/* Pricing Dialog */}
+      <PricingDialog
+        open={showPricingDialog}
+        onOpenChange={setShowPricingDialog}
+        currentPlan={limits.plan}
+        currentRecurring={limits.currentRecurringNotifications}
+        maxRecurring={limits.maxRecurringNotifications}
+      />
     </DashboardLayout>
   );
 }
