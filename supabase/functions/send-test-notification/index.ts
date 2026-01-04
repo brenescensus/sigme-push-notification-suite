@@ -178,9 +178,8 @@ async function sendWebPushNotification(
 ): Promise<{ success: boolean; message: string; platform: string; statusCode: number }> {
   try {
     console.log('[WebPush] Preparing notification to:', endpoint.substring(0, 50) + '...');
-    
-    // Build payload that matches service worker expectations
-    const payload = JSON.stringify({
+
+    const payloadJson = JSON.stringify({
       title: notification.title,
       body: notification.body,
       icon: notification.icon,
@@ -190,17 +189,15 @@ async function sendWebPushNotification(
       timestamp: Date.now(),
     });
 
-    // Create VAPID JWT for authorization
     const audience = new URL(endpoint).origin;
     const vapidJwt = await createVapidJwt(audience, vapidPrivateKey, websiteUrl);
 
-    console.log('[WebPush] VAPID JWT created, sending to endpoint...');
-    console.log('[WebPush] Payload:', payload);
+    const { body, saltB64Url, dhB64Url } = await encryptWebPushAes128Gcm(
+      new TextEncoder().encode(payloadJson),
+      p256dhKey,
+      authKey
+    );
 
-    // Send with VAPID authorization
-    // Note: This is a simplified implementation. For full RFC 8291 compliance,
-    // the payload should be encrypted with the subscriber's p256dh and auth keys.
-    // However, many push services accept unencrypted payloads with VAPID auth.
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -208,20 +205,24 @@ async function sendWebPushNotification(
         'Content-Encoding': 'aes128gcm',
         'TTL': '86400',
         'Urgency': 'high',
+        // Some push services still expect these headers even though aes128gcm includes
+        // the salt/dh in the binary body header.
+        'Encryption': `salt=${saltB64Url}`,
+        'Crypto-Key': `dh=${dhB64Url}`,
         'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
       },
-      body: new TextEncoder().encode(payload),
+      body: body as unknown as BodyInit,
     });
 
     const statusCode = response.status;
     console.log('[WebPush] Response status:', statusCode);
 
     if (response.ok || statusCode === 201) {
-      return { 
-        success: true, 
-        message: 'Push notification sent successfully', 
+      return {
+        success: true,
+        message: 'Push notification sent successfully',
         platform: 'web',
-        statusCode 
+        statusCode,
       };
     }
 
@@ -229,36 +230,35 @@ async function sendWebPushNotification(
     console.error('[WebPush] Error response:', errorText);
 
     if (statusCode === 404 || statusCode === 410) {
-      return { 
-        success: false, 
-        message: 'Subscription expired or invalid', 
+      return {
+        success: false,
+        message: 'Subscription expired or invalid',
         platform: 'web',
-        statusCode 
+        statusCode,
       };
     }
     if (statusCode === 401 || statusCode === 403) {
-      return { 
-        success: false, 
-        message: `VAPID authentication failed: ${errorText}`, 
+      return {
+        success: false,
+        message: `VAPID authentication failed: ${errorText}`,
         platform: 'web',
-        statusCode 
+        statusCode,
       };
     }
 
-    return { 
-      success: false, 
-      message: `Push service error (${statusCode}): ${errorText}`, 
+    return {
+      success: false,
+      message: `Push service error (${statusCode}): ${errorText}`,
       platform: 'web',
-      statusCode 
+      statusCode,
     };
-
   } catch (error) {
     console.error('[WebPush] Exception:', error);
-    return { 
-      success: false, 
-      message: String(error), 
+    return {
+      success: false,
+      message: String(error),
       platform: 'web',
-      statusCode: 0 
+      statusCode: 0,
     };
   }
 }
@@ -526,6 +526,154 @@ async function importRSAPrivateKey(pem: string): Promise<CryptoKey> {
   );
 }
 
+type Bytes = Uint8Array<ArrayBuffer>;
+
+async function encryptWebPushAes128Gcm(
+  plaintext: Uint8Array,
+  userPublicKeyB64Url: string,
+  userAuthB64Url: string
+): Promise<{ body: Bytes; saltB64Url: string; dhB64Url: string }> {
+  // RFC 8291 - aes128gcm
+  const salt = crypto.getRandomValues(new Uint8Array(16)) as Bytes;
+
+  const userPublicKeyBytes = base64UrlDecode(userPublicKeyB64Url);
+  const userAuthSecret = base64UrlDecode(userAuthB64Url);
+
+  // Ephemeral ECDH key pair
+  const serverKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  );
+
+  const serverPublicKeyRaw = new Uint8Array(
+    await crypto.subtle.exportKey('raw', serverKeyPair.publicKey)
+  ) as Bytes;
+
+  const userPublicKey = await crypto.subtle.importKey(
+    'raw',
+    userPublicKeyBytes,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    []
+  );
+
+  const sharedSecret = new Uint8Array(
+    await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: userPublicKey },
+      serverKeyPair.privateKey,
+      256
+    )
+  ) as Bytes;
+
+  // Derive IKM = HKDF-Expand(HKDF-Extract(auth, sharedSecret), "Content-Encoding: auth\0", 32)
+  const prk = await hkdfExtract(userAuthSecret, sharedSecret);
+  const ikm = await hkdfExpand(prk, new TextEncoder().encode('Content-Encoding: auth\0'), 32);
+
+  // PRK' = HKDF-Extract(salt, IKM)
+  const prk2 = await hkdfExtract(salt, ikm);
+
+  const context = createWebPushContext(userPublicKeyBytes, serverPublicKeyRaw);
+
+  const cekInfo = concatBytes(new TextEncoder().encode('Content-Encoding: aes128gcm\0'), context);
+  const nonceInfo = concatBytes(new TextEncoder().encode('Content-Encoding: nonce\0'), context);
+
+  const cek = await hkdfExpand(prk2, cekInfo, 16);
+  const nonce = await hkdfExpand(prk2, nonceInfo, 12);
+
+  // Append padding delimiter (0x02) per RFC 8291 (no padding)
+  const paddedPlaintext = concatBytes(plaintext, new Uint8Array([0x02]));
+
+  const aesKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['encrypt']);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, paddedPlaintext)
+  ) as Bytes;
+
+  // Build binary header (salt + rs(4096) + idlen + dh)
+  const rs = 4096;
+  const rsBytes = new Uint8Array([
+    (rs >>> 24) & 0xff,
+    (rs >>> 16) & 0xff,
+    (rs >>> 8) & 0xff,
+    rs & 0xff,
+  ]) as Bytes;
+
+  const idLen = new Uint8Array([serverPublicKeyRaw.length]) as Bytes;
+  const header = concatBytes(concatBytes(concatBytes(salt, rsBytes), idLen), serverPublicKeyRaw);
+
+  return {
+    body: concatBytes(header, ciphertext),
+    saltB64Url: base64UrlEncode(salt),
+    dhB64Url: base64UrlEncode(serverPublicKeyRaw),
+  };
+}
+
+function createWebPushContext(clientPublicKeyRaw: Bytes, serverPublicKeyRaw: Bytes): Bytes {
+  // "P-256\0" + uint16be(len(client)) + client + uint16be(len(server)) + server
+  const label = new TextEncoder().encode('P-256\0');
+  const clientLen = uint16be(clientPublicKeyRaw.length);
+  const serverLen = uint16be(serverPublicKeyRaw.length);
+  return concatBytes(
+    concatBytes(
+      concatBytes(concatBytes(label, clientLen), clientPublicKeyRaw),
+      serverLen
+    ),
+    serverPublicKeyRaw
+  );
+}
+
+function uint16be(value: number): Bytes {
+  const buf = new ArrayBuffer(2);
+  const out = new Uint8Array(buf) as Bytes;
+  out[0] = (value >>> 8) & 0xff;
+  out[1] = value & 0xff;
+  return out;
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Bytes {
+  const buf = new ArrayBuffer(a.length + b.length);
+  const out = new Uint8Array(buf) as Bytes;
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+async function hkdfExtract(salt: Bytes, ikm: Bytes): Promise<Bytes> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    salt,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const prk = await crypto.subtle.sign('HMAC', key, ikm);
+  return new Uint8Array(prk) as Bytes;
+}
+
+async function hkdfExpand(prk: Bytes, info: Uint8Array, length: number): Promise<Bytes> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    prk,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const hashLen = 32;
+  const n = Math.ceil(length / hashLen);
+
+  let t = new Uint8Array(new ArrayBuffer(0)) as Bytes;
+  let okm = new Uint8Array(new ArrayBuffer(0)) as Bytes;
+
+  for (let i = 1; i <= n; i++) {
+    const input = concatBytes(concatBytes(t, info), new Uint8Array([i]));
+    t = new Uint8Array(await crypto.subtle.sign('HMAC', key, input)) as Bytes;
+    okm = concatBytes(okm, t);
+  }
+
+  return okm.slice(0, length) as Bytes;
+}
+
 function base64UrlEncode(data: string | Uint8Array): string {
   let str: string;
   if (typeof data === 'string') {
@@ -540,13 +688,15 @@ function base64UrlEncode(data: string | Uint8Array): string {
   return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function base64UrlDecode(str: string): Uint8Array {
-  const padding = '='.repeat((4 - str.length % 4) % 4);
+function base64UrlDecode(str: string): Bytes {
+  const padding = '='.repeat((4 - (str.length % 4)) % 4);
   const base64 = (str + padding).replace(/-/g, '+').replace(/_/g, '/');
   const rawData = atob(base64);
-  const outputArray = new Uint8Array(rawData.length);
+
+  const buf = new ArrayBuffer(rawData.length);
+  const out = new Uint8Array(buf) as Bytes;
   for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
+    out[i] = rawData.charCodeAt(i);
   }
-  return outputArray;
+  return out;
 }
