@@ -106,7 +106,15 @@ export function WebsiteSelector() {
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <span className={cn("w-1.5 h-1.5 rounded-full", getStatusColor(website.status))} />
-                <span className="truncate">{new URL(website.url).hostname}</span>
+                <span className="truncate">
+                  {(() => {
+                    try {
+                      return new URL(website.url).hostname;
+                    } catch {
+                      return website.url;
+                    }
+                  })()}
+                </span>
               </div>
             </div>
             <span className="text-xs text-muted-foreground shrink-0">
