@@ -193,7 +193,7 @@ async function sendWebPushNotification(
     const audience = new URL(endpoint).origin;
     const vapidJwt = await createVapidJwt(audience, vapidPrivateKey, websiteUrl);
 
-    const { body, saltB64Url, dhB64Url } = await encryptWebPushAes128Gcm(
+    const { body } = await encryptWebPushAes128Gcm(
       new TextEncoder().encode(payloadJson),
       p256dhKey,
       authKey
@@ -206,10 +206,9 @@ async function sendWebPushNotification(
         'Content-Encoding': 'aes128gcm',
         'TTL': '86400',
         'Urgency': 'high',
-        // Some push services still expect these headers even though aes128gcm includes
-        // the salt/dh in the binary body header.
-        'Encryption': `salt=${saltB64Url}`,
-        'Crypto-Key': `dh=${dhB64Url};p256ecdsa=${vapidPublicKey}`,
+        // For aes128gcm (RFC 8291), salt/dh are encoded in the binary body.
+        // Some push services (e.g. Mozilla Autopush) reject an 'Encryption: salt=…' header.
+        'Crypto-Key': `p256ecdsa=${vapidPublicKey}`,
         'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
       },
       body: body as unknown as BodyInit,
