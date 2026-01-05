@@ -354,10 +354,9 @@ async function sendWebPushNotification(
         'Content-Encoding': 'aes128gcm',
         'TTL': '86400',
         'Urgency': 'high',
-        // For aes128gcm (RFC 8291), salt/dh are encoded in the binary body.
-        // Mozilla Autopush rejects an 'Encryption: salt=…' header.
+        // VAPID (RFC 8292)
         'Crypto-Key': `p256ecdsa=${vapidPublicKey}`,
-        'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
+        'Authorization': `WebPush ${vapidJwt}`,
       },
       body: body as unknown as BodyInit,
     });
