@@ -144,7 +144,8 @@ Deno.serve(async (req) => {
 
     return new Response(
       JSON.stringify(result),
-      { status: result.success ? 200 : 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      // Always return 200 so the client can display detailed failure reasons.
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
   } catch (error: unknown) {
@@ -208,7 +209,7 @@ async function sendWebPushNotification(
         // Some push services still expect these headers even though aes128gcm includes
         // the salt/dh in the binary body header.
         'Encryption': `salt=${saltB64Url}`,
-        'Crypto-Key': `dh=${dhB64Url}`,
+        'Crypto-Key': `dh=${dhB64Url};p256ecdsa=${vapidPublicKey}`,
         'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
       },
       body: body as unknown as BodyInit,
