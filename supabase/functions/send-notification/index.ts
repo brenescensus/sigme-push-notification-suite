@@ -355,7 +355,7 @@ async function sendWebPushNotification(
         'TTL': '86400',
         'Urgency': 'high',
         'Encryption': `salt=${saltB64Url}`,
-        'Crypto-Key': `dh=${dhB64Url}`,
+        'Crypto-Key': `dh=${dhB64Url};p256ecdsa=${vapidPublicKey}`,
         'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
       },
       body: body as unknown as BodyInit,
