@@ -60,7 +60,9 @@ export default function WebsiteIntegrationPage() {
 const SIGME_CONFIG = {
   websiteId: '${website.id}',
   vapidPublicKey: '${website.vapidPublicKey}',
-  apiEndpoint: '${SUPABASE_URL}/functions/v1'
+  apiEndpoint: '${SUPABASE_URL}/functions/v1',
+  publishableKey: '${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}',
+  debug: false
 };
 
 // Handle push events
@@ -99,7 +101,11 @@ self.addEventListener('push', function(event) {
   if (data.notificationId) {
     fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SIGME_CONFIG.publishableKey,
+        'Authorization': 'Bearer ' + SIGME_CONFIG.publishableKey,
+      },
       body: JSON.stringify({
         websiteId: SIGME_CONFIG.websiteId,
         notificationId: data.notificationId,
@@ -120,7 +126,11 @@ self.addEventListener('notificationclick', function(event) {
   if (data.notificationId) {
     fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SIGME_CONFIG.publishableKey,
+        'Authorization': 'Bearer ' + SIGME_CONFIG.publishableKey,
+      },
       body: JSON.stringify({
         websiteId: SIGME_CONFIG.websiteId,
         notificationId: data.notificationId,
@@ -154,7 +164,11 @@ self.addEventListener('notificationclose', function(event) {
   if (data.notificationId) {
     fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SIGME_CONFIG.publishableKey,
+        'Authorization': 'Bearer ' + SIGME_CONFIG.publishableKey,
+      },
       body: JSON.stringify({
         websiteId: SIGME_CONFIG.websiteId,
         notificationId: data.notificationId,
@@ -175,7 +189,10 @@ self.addEventListener('notificationclose', function(event) {
     websiteId: '${website.id}',
     vapidPublicKey: '${website.vapidPublicKey}',
     apiEndpoint: '${SUPABASE_URL}/functions/v1',
-    serviceWorkerPath: '/sigme-sw.js'
+    publishableKey: '${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}',
+    serviceWorkerPath: '/sigme-sw.js',
+    serviceWorkerScope: '/',
+    debug: false
   };
 
   // Check browser support
@@ -190,10 +207,10 @@ self.addEventListener('notificationclose', function(event) {
     return;
   }
 
-  navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath)
+  navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath, { scope: SIGME_CONFIG.serviceWorkerScope })
     .then(function(registration) {
       console.log('[Sigme] Service Worker registered:', registration.scope);
-      
+
       // Check existing subscription first
       return registration.pushManager.getSubscription().then(function(existingSub) {
         if (existingSub) {
@@ -269,40 +286,48 @@ self.addEventListener('notificationclose', function(event) {
       else if (ua.includes('Android')) os = 'Android';
       else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
 
-      // Register with Sigme backend using correct format
-      // IMPORTANT: subscription object must have nested keys structure
-      return fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          websiteId: SIGME_CONFIG.websiteId,
-          subscription: {
-            endpoint: subJson.endpoint,
-            keys: {
-              p256dh: subJson.keys.p256dh,
-              auth: subJson.keys.auth
-            }
-          },
-          userAgent: ua,
-          language: navigator.language,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-        })
-      });
+       // Register with Sigme backend
+       // IMPORTANT: the Functions endpoint requires a publishable API key (apikey header)
+       return fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+           'apikey': SIGME_CONFIG.publishableKey,
+           'Authorization': 'Bearer ' + SIGME_CONFIG.publishableKey,
+         },
+         body: JSON.stringify({
+           websiteId: SIGME_CONFIG.websiteId,
+           subscription: {
+             endpoint: subJson.endpoint,
+             keys: {
+               p256dh: subJson.keys.p256dh,
+               auth: subJson.keys.auth
+             }
+           },
+           userAgent: ua,
+           language: navigator.language,
+           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+         })
+       });
     })
-    .then(function(response) {
-      if (response && response.ok) {
-        return response.json().then(function(data) {
-          console.log('[Sigme] Subscriber registered:', data.subscriberId);
-        });
-      } else if (response) {
-        return response.json().then(function(error) {
-          console.error('[Sigme] Registration failed:', error);
-        });
-      }
-    })
-    .catch(function(error) {
-      console.error('[Sigme] Error:', error);
-    });
+     .then(function(response) {
+       if (!response) return;
+
+       return response.text().then(function(text) {
+         let parsed = null;
+         try { parsed = text ? JSON.parse(text) : null; } catch (_) {}
+
+         if (response.ok) {
+           console.log('[Sigme] Subscriber registered:', parsed?.subscriberId || parsed?.subscriber_id || parsed);
+           return;
+         }
+
+         console.error('[Sigme] Registration failed:', response.status, parsed || text);
+       });
+     })
+     .catch(function(error) {
+       console.error('[Sigme] Error:', error);
+     });
 
   // Convert VAPID key to Uint8Array for PushManager
   function urlBase64ToUint8Array(base64String) {
