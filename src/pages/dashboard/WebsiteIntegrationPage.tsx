@@ -215,7 +215,32 @@ self.addEventListener('notificationclose', function(event) {
       return registration.pushManager.getSubscription().then(function(existingSub) {
         if (existingSub) {
           console.log('[Sigme] Existing subscription found');
-          return existingSub;
+          // Check if the existing subscription uses the same VAPID key
+          // If not, unsubscribe and resubscribe with the correct key
+          var existingKey = existingSub.options && existingSub.options.applicationServerKey;
+          var currentKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
+          
+          // Compare keys - if different, unsubscribe first
+          var keysMatch = false;
+          if (existingKey) {
+            var existingKeyArray = new Uint8Array(existingKey);
+            keysMatch = existingKeyArray.length === currentKey.length && 
+              existingKeyArray.every(function(val, i) { return val === currentKey[i]; });
+          }
+          
+          if (keysMatch) {
+            console.log('[Sigme] Existing subscription uses correct VAPID key');
+            return existingSub;
+          } else {
+            console.log('[Sigme] VAPID key mismatch, unsubscribing old subscription...');
+            return existingSub.unsubscribe().then(function() {
+              console.log('[Sigme] Old subscription removed, creating new one...');
+              return registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: currentKey
+              });
+            });
+          }
         }
         
         // Request permission
