@@ -208,7 +208,7 @@ async function sendWebPushNotification(
         'Urgency': 'high',
         // VAPID (RFC 8292)
         'Crypto-Key': `p256ecdsa=${vapidPublicKey}`,
-        'Authorization': `WebPush ${vapidJwt}`,
+        'Authorization': `Bearer ${vapidJwt}`,
       },
       body: body as unknown as BodyInit,
     });
@@ -277,10 +277,19 @@ async function createVapidJwt(
     alg: 'ES256',
   };
 
+  let sub = 'mailto:noreply@example.com';
+  try {
+    sub = subject.startsWith('mailto:')
+      ? subject
+      : `mailto:noreply@${new URL(subject).hostname}`;
+  } catch {
+    // keep fallback
+  }
+
   const payload = {
     aud: audience,
     exp: now + 43200, // 12 hours
-    sub: subject.startsWith('mailto:') ? subject : `mailto:noreply@${new URL(subject).hostname}`,
+    sub,
   };
 
   const headerB64 = base64UrlEncode(JSON.stringify(header));
