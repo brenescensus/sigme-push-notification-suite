@@ -316,21 +316,66 @@ self.addEventListener('notificationclose', function(event) {
   }
 
   // Register service worker
-  navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath)
-    .then(function(registration) {
+  navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath, { scope: '/' })
+    .then(function(reg) {
       console.log('[Sigme] Service Worker registered');
-      
-      // Request permission and subscribe
-      return Notification.requestPermission().then(function(permission) {
+      return navigator.serviceWorker.ready.then(function() {
+        return reg;
+      });
+    })
+    .then(function(registration) {
+      console.log('[Sigme] Service Worker ready:', registration.scope);
+
+      const ensurePermission = function() {
+        if (Notification.permission === 'granted') return Promise.resolve('granted');
+        if (Notification.permission === 'denied') return Promise.resolve('denied');
+        return Notification.requestPermission();
+      };
+
+      return ensurePermission().then(function(permission) {
         if (permission !== 'granted') {
-          console.log('[Sigme] Notification permission denied');
-          return;
+          console.log('[Sigme] Notification permission not granted:', permission);
+          return null;
         }
-        
-        return registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey)
-        });
+
+        const applicationServerKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
+
+        return registration.pushManager.getSubscription()
+          .then(function(existingSub) {
+            if (!existingSub) {
+              console.log('[Sigme] No existing subscription found');
+              return;
+            }
+            console.log('[Sigme] Existing subscription found, unsubscribing...');
+            return existingSub.unsubscribe()
+              .then(function(ok) {
+                console.log('[Sigme] Existing subscription unsubscribed:', ok);
+              })
+              .catch(function(err) {
+                console.warn('[Sigme] Failed to unsubscribe existing subscription (continuing):', err);
+              });
+          })
+          .then(function() {
+            console.log('[Sigme] Subscribing with current VAPID key...');
+            return registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: applicationServerKey
+            }).catch(function(err) {
+              if (err && err.name === 'InvalidStateError') {
+                console.warn('[Sigme] InvalidStateError on subscribe; retrying unsubscribe+subscribe once');
+                return registration.pushManager.getSubscription()
+                  .then(function(sub) { return sub ? sub.unsubscribe() : null; })
+                  .catch(function(e) { console.warn('[Sigme] Retry unsubscribe failed (continuing):', e); })
+                  .then(function() {
+                    return registration.pushManager.subscribe({
+                      userVisibleOnly: true,
+                      applicationServerKey: applicationServerKey
+                    });
+                  });
+              }
+              throw err;
+            });
+          });
       });
     })
     .then(function(subscription) {
@@ -339,10 +384,14 @@ self.addEventListener('notificationclose', function(event) {
       // Send subscription to Sigme backend
       return fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': '${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}',
+          'Authorization': 'Bearer ' + '${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}',
+        },
         body: JSON.stringify({
           websiteId: SIGME_CONFIG.websiteId,
-          subscription: subscription,
+          subscription: subscription.toJSON ? subscription.toJSON() : subscription,
           userAgent: navigator.userAgent,
           language: navigator.language,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
