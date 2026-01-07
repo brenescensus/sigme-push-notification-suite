@@ -208,57 +208,53 @@ self.addEventListener('notificationclose', function(event) {
   }
 
   navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath, { scope: SIGME_CONFIG.serviceWorkerScope })
+    .then(function() {
+      console.log('[Sigme] Service Worker registered');
+      // Ensure the service worker is active/ready before interacting with PushManager
+      return navigator.serviceWorker.ready;
+    })
     .then(function(registration) {
-      console.log('[Sigme] Service Worker registered:', registration.scope);
+      console.log('[Sigme] Service Worker ready:', registration.scope);
 
-      // Check existing subscription first
-      return registration.pushManager.getSubscription().then(function(existingSub) {
-        if (existingSub) {
-          console.log('[Sigme] Existing subscription found');
-          // Check if the existing subscription uses the same VAPID key
-          // If not, unsubscribe and resubscribe with the correct key
-          var existingKey = existingSub.options && existingSub.options.applicationServerKey;
-          var currentKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
-          
-          // Compare keys - if different, unsubscribe first
-          var keysMatch = false;
-          if (existingKey) {
-            var existingKeyArray = new Uint8Array(existingKey);
-            keysMatch = existingKeyArray.length === currentKey.length && 
-              existingKeyArray.every(function(val, i) { return val === currentKey[i]; });
-          }
-          
-          if (keysMatch) {
-            console.log('[Sigme] Existing subscription uses correct VAPID key');
-            return existingSub;
-          } else {
-            console.log('[Sigme] VAPID key mismatch, unsubscribing old subscription...');
-            return existingSub.unsubscribe().then(function() {
-              console.log('[Sigme] Old subscription removed, creating new one...');
-              return registration.pushManager.subscribe({
-                userVisibleOnly: true,
-                applicationServerKey: currentKey
-              });
-            });
-          }
-        }
-        
-        // Request permission
-        return Notification.requestPermission().then(function(permission) {
+      // Always ensure we have permission first
+      const ensurePermission = function() {
+        if (Notification.permission === 'granted') return Promise.resolve('granted');
+        if (Notification.permission === 'denied') return Promise.resolve('denied');
+        return Notification.requestPermission();
+      };
+
+      return ensurePermission()
+        .then(function(permission) {
           if (permission !== 'granted') {
-            console.log('[Sigme] Notification permission denied');
+            console.log('[Sigme] Notification permission not granted:', permission);
             return null;
           }
-          
-          console.log('[Sigme] Permission granted, subscribing...');
-          
-          // Subscribe with VAPID key
-          return registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey)
-          });
+
+          const applicationServerKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
+
+          // Unsubscribe-first pattern to avoid:
+          // "A subscription with a different applicationServerKey already exists"
+          return registration.pushManager.getSubscription()
+            .then(function(existingSub) {
+              if (!existingSub) return;
+              console.log('[Sigme] Existing subscription found, unsubscribing...');
+              return existingSub.unsubscribe()
+                .then(function(ok) {
+                  console.log('[Sigme] Existing subscription unsubscribed:', ok);
+                })
+                .catch(function(err) {
+                  // Even if unsubscribe fails, continue and try to resubscribe
+                  console.warn('[Sigme] Failed to unsubscribe existing subscription (continuing):', err);
+                });
+            })
+            .then(function() {
+              console.log('[Sigme] Subscribing with current VAPID key...');
+              return registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: applicationServerKey
+              });
+            });
         });
-      });
     })
     .then(function(subscription) {
       if (!subscription) {
