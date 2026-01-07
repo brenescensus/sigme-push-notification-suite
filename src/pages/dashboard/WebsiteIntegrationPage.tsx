@@ -208,10 +208,12 @@ self.addEventListener('notificationclose', function(event) {
   }
 
   navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath, { scope: SIGME_CONFIG.serviceWorkerScope })
-    .then(function() {
+    .then(function(reg) {
       console.log('[Sigme] Service Worker registered');
       // Ensure the service worker is active/ready before interacting with PushManager
-      return navigator.serviceWorker.ready;
+      return navigator.serviceWorker.ready.then(function() {
+        return reg;
+      });
     })
     .then(function(registration) {
       console.log('[Sigme] Service Worker ready:', registration.scope);
@@ -236,7 +238,11 @@ self.addEventListener('notificationclose', function(event) {
           // "A subscription with a different applicationServerKey already exists"
           return registration.pushManager.getSubscription()
             .then(function(existingSub) {
-              if (!existingSub) return;
+              if (!existingSub) {
+                console.log('[Sigme] No existing subscription found');
+                return;
+              }
+
               console.log('[Sigme] Existing subscription found, unsubscribing...');
               return existingSub.unsubscribe()
                 .then(function(ok) {
@@ -248,10 +254,33 @@ self.addEventListener('notificationclose', function(event) {
                 });
             })
             .then(function() {
+              // Verify we're clean before subscribing
+              return registration.pushManager.getSubscription().then(function(after) {
+                console.log('[Sigme] Subscription after unsubscribe:', after ? 'STILL PRESENT' : 'none');
+              });
+            })
+            .then(function() {
               console.log('[Sigme] Subscribing with current VAPID key...');
               return registration.pushManager.subscribe({
                 userVisibleOnly: true,
                 applicationServerKey: applicationServerKey
+              }).catch(function(err) {
+                // One extra graceful recovery attempt for stubborn browsers
+                if (err && err.name === 'InvalidStateError') {
+                  console.warn('[Sigme] InvalidStateError on subscribe; retrying unsubscribe+subscribe once');
+                  return registration.pushManager.getSubscription()
+                    .then(function(sub) { return sub ? sub.unsubscribe() : null; })
+                    .catch(function(e) {
+                      console.warn('[Sigme] Retry unsubscribe failed (continuing):', e);
+                    })
+                    .then(function() {
+                      return registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: applicationServerKey
+                      });
+                    });
+                }
+                throw err;
               });
             });
         });
