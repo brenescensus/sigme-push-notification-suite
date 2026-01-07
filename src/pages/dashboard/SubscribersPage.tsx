@@ -30,8 +30,8 @@ import {
 import { TestNotificationDialog } from "@/components/subscribers/TestNotificationDialog";
 import { useWebsite } from "@/contexts/WebsiteContext";
 import { supabase } from "@/integrations/supabase/client";
-import { useQuery } from "@tanstack/react-query";
-
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "@/hooks/use-toast";
 interface Subscriber {
   id: string;
   browser: string | null;
@@ -84,11 +84,13 @@ const formatTime = (dateString: string | null) => {
 
 export default function SubscribersPage() {
   const { currentWebsite } = useWebsite();
+  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [deviceFilter, setDeviceFilter] = useState("all");
   const [testDialogOpen, setTestDialogOpen] = useState(false);
   const [selectedSubscriber, setSelectedSubscriber] = useState<Subscriber | null>(null);
+  const [isDeleting, setIsDeleting] = useState<string | null>(null);
 
   const { data: subscribers = [], isLoading } = useQuery({
     queryKey: ['subscribers', currentWebsite?.id],
@@ -127,6 +129,34 @@ export default function SubscribersPage() {
   const handleSendTest = (subscriber: Subscriber) => {
     setSelectedSubscriber(subscriber);
     setTestDialogOpen(true);
+  };
+
+  const handleRemoveSubscriber = async (subscriber: Subscriber) => {
+    if (isDeleting) return;
+    setIsDeleting(subscriber.id);
+    try {
+      const { error } = await supabase
+        .from('subscribers')
+        .delete()
+        .eq('id', subscriber.id);
+      
+      if (error) throw error;
+      
+      toast({
+        title: "Subscriber removed",
+        description: "The subscriber has been removed successfully.",
+      });
+      queryClient.invalidateQueries({ queryKey: ['subscribers', currentWebsite?.id] });
+    } catch (err: any) {
+      console.error('Failed to remove subscriber:', err);
+      toast({
+        title: "Error",
+        description: err.message || "Failed to remove subscriber",
+        variant: "destructive",
+      });
+    } finally {
+      setIsDeleting(null);
+    }
   };
 
   return (
@@ -311,7 +341,13 @@ export default function SubscribersPage() {
                               <Send className="w-4 h-4 mr-2" />
                               Send Test Notification
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="text-destructive">Remove</DropdownMenuItem>
+                            <DropdownMenuItem 
+                              className="text-destructive"
+                              disabled={isDeleting === subscriber.id}
+                              onClick={() => handleRemoveSubscriber(subscriber)}
+                            >
+                              {isDeleting === subscriber.id ? "Removing..." : "Remove"}
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </td>
