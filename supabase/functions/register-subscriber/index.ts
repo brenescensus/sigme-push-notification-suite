@@ -2,13 +2,16 @@
  * Register Subscriber Edge Function
  * 
  * Public endpoint for registering push notification subscribers.
- * Called from client websites via the integration script.
+ * Called from client websites via the integration script/service worker.
  * 
  * Handles:
  * - Web Push subscriptions
- * - Device detection
- * - Geolocation (basic)
- * - Duplicate prevention
+ * - Device detection (browser, OS, device type)
+ * - Duplicate prevention via upsert
+ * - Automatic subscription updates
+ * 
+ * REFACTORED: Improved logging, error handling, and supports
+ * both nested and flat subscription formats.
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -31,12 +34,27 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     const body = await req.json();
-    const { websiteId, subscription, userAgent, language, timezone, fcmToken, apnsToken } = body;
+    console.log('[RegisterSubscriber] Received request body:', JSON.stringify(body, null, 2));
 
-    console.log('[RegisterSubscriber] Received request for website:', websiteId);
+    const { 
+      websiteId, 
+      subscription, 
+      userAgent, 
+      language, 
+      timezone, 
+      fcmToken, 
+      apnsToken,
+      // Also accept flat fields from SW
+      browser: providedBrowser,
+      browserVersion: providedBrowserVersion,
+      deviceType: providedDeviceType,
+      os: providedOs,
+      platform: providedPlatform
+    } = body;
 
     // Validate required fields
     if (!websiteId) {
+      console.error('[RegisterSubscriber] Missing websiteId');
       return new Response(
         JSON.stringify({ error: 'websiteId is required' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -51,28 +69,28 @@ serve(async (req) => {
       .maybeSingle();
 
     if (websiteError || !website) {
-      console.error('[RegisterSubscriber] Website not found:', websiteId);
+      console.error('[RegisterSubscriber] Website not found:', websiteId, websiteError);
       return new Response(
         JSON.stringify({ error: 'Invalid website' }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Parse user agent for device info
+    // Parse user agent for device info (fallback if not provided)
     const deviceInfo = parseUserAgent(userAgent || '');
     
     // Determine platform
-    let platform = 'web';
+    let platform = providedPlatform || 'web';
     if (fcmToken) platform = 'android';
     if (apnsToken) platform = 'ios';
 
     // Build subscriber record
-    const subscriberData: any = {
+    const subscriberData: Record<string, unknown> = {
       website_id: websiteId,
-      browser: deviceInfo.browser,
-      browser_version: deviceInfo.browserVersion,
-      device_type: deviceInfo.deviceType,
-      os: deviceInfo.os,
+      browser: providedBrowser || deviceInfo.browser,
+      browser_version: providedBrowserVersion || deviceInfo.browserVersion,
+      device_type: providedDeviceType || deviceInfo.deviceType,
+      os: providedOs || deviceInfo.os,
       platform,
       language: language || null,
       timezone: timezone || null,
@@ -81,10 +99,14 @@ serve(async (req) => {
     };
 
     // Add Web Push subscription data
+    // Support both nested (subscription.endpoint) and flat (endpoint) formats
     if (subscription) {
       subscriberData.endpoint = subscription.endpoint;
-      subscriberData.p256dh_key = subscription.keys?.p256dh || '';
-      subscriberData.auth_key = subscription.keys?.auth || '';
+      // Support both subscription.keys.p256dh and subscription.keys format
+      if (subscription.keys) {
+        subscriberData.p256dh_key = subscription.keys.p256dh || '';
+        subscriberData.auth_key = subscription.keys.auth || '';
+      }
     }
 
     // Add FCM/APNs tokens
@@ -93,11 +115,19 @@ serve(async (req) => {
 
     // Validate we have at least one subscription method
     if (!subscriberData.endpoint && !fcmToken && !apnsToken) {
+      console.error('[RegisterSubscriber] No valid subscription provided');
       return new Response(
         JSON.stringify({ error: 'No valid subscription provided' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
+
+    console.log('[RegisterSubscriber] Upserting subscriber:', {
+      website_id: subscriberData.website_id,
+      endpoint: (subscriberData.endpoint as string)?.substring(0, 50) + '...',
+      browser: subscriberData.browser,
+      device_type: subscriberData.device_type
+    });
 
     // Upsert subscriber (update if exists, insert if new)
     const { data: subscriber, error: insertError } = await supabase
@@ -110,14 +140,14 @@ serve(async (req) => {
       .single();
 
     if (insertError) {
-      console.error('[RegisterSubscriber] Insert error:', insertError);
+      console.error('[RegisterSubscriber] Upsert error:', insertError);
       return new Response(
-        JSON.stringify({ error: 'Failed to register subscriber' }),
+        JSON.stringify({ error: 'Failed to register subscriber', details: insertError.message }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    console.log('[RegisterSubscriber] Subscriber registered:', subscriber.id);
+    console.log('[RegisterSubscriber] Subscriber registered successfully:', subscriber.id);
 
     return new Response(
       JSON.stringify({ 
@@ -131,7 +161,7 @@ serve(async (req) => {
   } catch (error) {
     console.error('[RegisterSubscriber] Unexpected error:', error);
     return new Response(
-      JSON.stringify({ error: 'Internal server error' }),
+      JSON.stringify({ error: 'Internal server error', details: String(error) }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
@@ -149,7 +179,7 @@ function parseUserAgent(ua: string): {
   let deviceType: 'desktop' | 'mobile' | 'tablet' = 'desktop';
   let os = 'Unknown';
 
-  // Detect browser
+  // Detect browser (order matters - Edge includes Chrome, Safari includes Chrome in some UAs)
   if (ua.includes('Firefox/')) {
     browser = 'Firefox';
     browserVersion = ua.match(/Firefox\/(\d+)/)?.[1] || '';
@@ -167,7 +197,7 @@ function parseUserAgent(ua: string): {
   // Detect OS
   if (ua.includes('Windows')) os = 'Windows';
   else if (ua.includes('Mac OS')) os = 'macOS';
-  else if (ua.includes('Linux')) os = 'Linux';
+  else if (ua.includes('Linux') && !ua.includes('Android')) os = 'Linux';
   else if (ua.includes('Android')) os = 'Android';
   else if (ua.includes('iOS') || ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
 
