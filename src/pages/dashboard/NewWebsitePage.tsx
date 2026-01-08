@@ -6,14 +6,13 @@
  * 2. Generate VAPID keys via secure backend
  * 3. Show integration code and service worker
  * 
- * IMPORTANT: VAPID keys are now generated server-side using proper
- * P-256 elliptic curve cryptography. Client-side random strings
- * are NOT valid VAPID keys and will cause browser errors.
+ * REFACTORED: Uses self-configuring service worker with query params.
+ * No manual console steps required.
  */
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Globe, ArrowRight, Check, Key, Code, Download, Copy, Sparkles, AlertCircle } from "lucide-react";
+import { Globe, ArrowRight, Check, Key, Code, Download, Copy, AlertCircle } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -163,8 +162,6 @@ export default function NewWebsitePage() {
   const handleComplete = () => {
     if (!generatedWebsite) return;
     
-    // Website is already saved to database in handleStep1Submit
-    // Just refresh the context and navigate
     toast({
       title: "Website added successfully!",
       description: "You can now integrate Sigme on your website.",
@@ -182,243 +179,355 @@ export default function NewWebsitePage() {
 
   // Get the Supabase URL for API endpoints
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-  // Service Worker template with actual Supabase URLs
-  const serviceWorkerCode = generatedWebsite ? `// Sigme Push Notification Service Worker
-// Website: ${generatedWebsite.name}
-// Generated: ${new Date().toISOString()}
+  // ============================================================================
+  // REFACTORED SERVICE WORKER - Self-configuring via query params
+  // ============================================================================
+  const serviceWorkerCode = generatedWebsite ? `/**
+ * Sigme Push Notification Service Worker
+ * Website: ${generatedWebsite.name}
+ * Generated: ${new Date().toISOString()}
+ * 
+ * SINGLE SOURCE OF TRUTH for all push logic.
+ * Config received via query params on registration.
+ */
 
+// Configuration (injected via query params)
 const SIGME_CONFIG = {
-  websiteId: '${generatedWebsite.id}',
-  vapidPublicKey: '${generatedWebsite.vapidPublicKey}',
-  apiEndpoint: '${supabaseUrl}/functions/v1'
+  websiteId: '',
+  vapidPublicKey: '',
+  apiEndpoint: '',
+  anonKey: '',
+  debug: true
 };
 
-// Handle push events
-self.addEventListener('push', function(event) {
-  console.log('[Sigme SW] Push received:', event);
-  
-  let data = {};
-  if (event.data) {
-    try {
-      data = event.data.json();
-    } catch (e) {
-      data = { title: 'New Notification', body: event.data.text() };
+// Parse config from SW URL query params
+const swUrl = new URL(self.location.href);
+SIGME_CONFIG.websiteId = swUrl.searchParams.get('websiteId') || '';
+SIGME_CONFIG.vapidPublicKey = swUrl.searchParams.get('vapid') || '';
+SIGME_CONFIG.apiEndpoint = swUrl.searchParams.get('api') || '';
+SIGME_CONFIG.anonKey = swUrl.searchParams.get('key') || '';
+
+function log(...args) {
+  if (SIGME_CONFIG.debug) console.log('[Sigme SW]', ...args);
+}
+
+function logError(...args) {
+  console.error('[Sigme SW Error]', ...args);
+}
+
+log('Service Worker loaded with config:', {
+  websiteId: SIGME_CONFIG.websiteId,
+  vapidKeyPrefix: SIGME_CONFIG.vapidPublicKey.substring(0, 20) + '...',
+  apiEndpoint: SIGME_CONFIG.apiEndpoint
+});
+
+// VAPID key utilities
+function urlBase64ToUint8Array(base64String) {
+  try {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
     }
+    return outputArray;
+  } catch (e) {
+    logError('Failed to decode VAPID key:', e);
+    return null;
+  }
+}
+
+function uint8ArrayToUrlBase64(uint8Array) {
+  let binary = '';
+  for (let i = 0; i < uint8Array.length; i++) {
+    binary += String.fromCharCode(uint8Array[i]);
+  }
+  return btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+}
+
+// Subscription management with conflict resolution
+async function ensureSubscription() {
+  if (!SIGME_CONFIG.websiteId || !SIGME_CONFIG.vapidPublicKey) {
+    logError('Missing websiteId or vapidPublicKey');
+    return null;
   }
 
+  if (!SIGME_CONFIG.vapidPublicKey.startsWith('B')) {
+    logError('Invalid VAPID public key - must start with B');
+    return null;
+  }
+
+  const applicationServerKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
+  if (!applicationServerKey || applicationServerKey.length !== 65) {
+    logError('Invalid VAPID key length:', applicationServerKey?.length);
+    return null;
+  }
+
+  try {
+    let existingSub = await self.registration.pushManager.getSubscription();
+    
+    if (existingSub) {
+      const existingKey = existingSub.options?.applicationServerKey;
+      if (existingKey) {
+        const existingKeyBase64 = uint8ArrayToUrlBase64(new Uint8Array(existingKey));
+        if (existingKeyBase64 === SIGME_CONFIG.vapidPublicKey) {
+          log('Existing subscription matches, reusing');
+          return existingSub;
+        }
+        log('VAPID key mismatch, unsubscribing...');
+      }
+      
+      try {
+        await existingSub.unsubscribe();
+        log('Unsubscribed old subscription');
+      } catch (e) {
+        logError('Unsubscribe failed:', e);
+      }
+    }
+    
+    log('Creating new subscription...');
+    const newSub = await self.registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: applicationServerKey
+    });
+    
+    log('Subscription created:', newSub.endpoint);
+    return newSub;
+    
+  } catch (err) {
+    if (err.name === 'InvalidStateError') {
+      logError('InvalidStateError, aggressive cleanup...');
+      try {
+        const sub = await self.registration.pushManager.getSubscription();
+        if (sub) await sub.unsubscribe();
+        return await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: applicationServerKey
+        });
+      } catch (e) {
+        logError('Retry failed:', e);
+      }
+    }
+    logError('Subscription error:', err);
+    return null;
+  }
+}
+
+// Backend registration
+async function registerWithBackend(subscription) {
+  if (!subscription || !SIGME_CONFIG.apiEndpoint) return false;
+
+  const subJson = subscription.toJSON();
+  if (!subJson.keys?.p256dh || !subJson.keys?.auth) {
+    logError('Missing subscription keys');
+    return false;
+  }
+
+  const ua = self.navigator?.userAgent || '';
+  let browser = 'Unknown', browserVersion = '', deviceType = 'desktop', os = 'Unknown';
+  
+  if (ua.includes('Firefox')) { browser = 'Firefox'; browserVersion = (ua.match(/Firefox\\/(\\d+)/) || [])[1] || ''; }
+  else if (ua.includes('Edg')) { browser = 'Edge'; browserVersion = (ua.match(/Edg\\/(\\d+)/) || [])[1] || ''; }
+  else if (ua.includes('Chrome')) { browser = 'Chrome'; browserVersion = (ua.match(/Chrome\\/(\\d+)/) || [])[1] || ''; }
+  else if (ua.includes('Safari') && !ua.includes('Chrome')) { browser = 'Safari'; }
+  
+  if (ua.includes('Windows')) os = 'Windows';
+  else if (ua.includes('Mac OS')) os = 'macOS';
+  else if (ua.includes('Linux') && !ua.includes('Android')) os = 'Linux';
+  else if (ua.includes('Android')) os = 'Android';
+  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+  
+  if (/Mobi|Android|iPhone/.test(ua)) deviceType = 'mobile';
+  else if (/Tablet|iPad/.test(ua)) deviceType = 'tablet';
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (SIGME_CONFIG.anonKey) {
+      headers['apikey'] = SIGME_CONFIG.anonKey;
+      headers['Authorization'] = 'Bearer ' + SIGME_CONFIG.anonKey;
+    }
+
+    const response = await fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        websiteId: SIGME_CONFIG.websiteId,
+        subscription: { endpoint: subJson.endpoint, keys: subJson.keys },
+        userAgent: ua,
+        browser, browserVersion, deviceType, os,
+        platform: 'web',
+        language: self.navigator?.language || 'en',
+        timezone: 'UTC'
+      })
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      log('Registered:', result.subscriberId);
+      return true;
+    }
+    logError('Registration failed:', response.status);
+    return false;
+  } catch (err) {
+    logError('Registration error:', err);
+    return false;
+  }
+}
+
+// Tracking helper
+async function trackEvent(eventType, notificationId, action) {
+  if (!SIGME_CONFIG.apiEndpoint || !notificationId) return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (SIGME_CONFIG.anonKey) {
+      headers['apikey'] = SIGME_CONFIG.anonKey;
+      headers['Authorization'] = 'Bearer ' + SIGME_CONFIG.anonKey;
+    }
+    await fetch(SIGME_CONFIG.apiEndpoint + '/track-notification', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        websiteId: SIGME_CONFIG.websiteId,
+        notificationId,
+        event: eventType,
+        action: action || 'default'
+      })
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// Install
+self.addEventListener('install', () => {
+  log('Installing...');
+  self.skipWaiting();
+});
+
+// Activate
+self.addEventListener('activate', (event) => {
+  log('Activating...');
+  event.waitUntil(
+    self.clients.claim().then(async () => {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        const sub = await ensureSubscription();
+        if (sub) await registerWithBackend(sub);
+      }
+    })
+  );
+});
+
+// Message handler
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SIGME_SUBSCRIBE') {
+    event.waitUntil(
+      ensureSubscription().then(async (sub) => {
+        if (sub) {
+          await registerWithBackend(sub);
+          event.source?.postMessage({ type: 'SIGME_SUBSCRIBED', success: true });
+        } else {
+          event.source?.postMessage({ type: 'SIGME_SUBSCRIBED', success: false });
+        }
+      })
+    );
+  }
+});
+
+// Push
+self.addEventListener('push', (event) => {
+  log('Push received');
+  let data = {};
+  if (event.data) {
+    try { data = event.data.json(); } catch (e) { data = { title: 'Notification', body: event.data.text() }; }
+  }
+  
   const options = {
     body: data.body || '',
     icon: data.icon || '/icon-192x192.png',
     image: data.image,
     badge: data.badge || '/badge-72x72.png',
     vibrate: [100, 50, 100],
-    data: {
-      url: data.url || '/',
-      notificationId: data.notificationId,
-      websiteId: SIGME_CONFIG.websiteId
-    },
+    data: { url: data.url || '/', notificationId: data.notificationId, websiteId: SIGME_CONFIG.websiteId },
     actions: data.actions || [],
-    requireInteraction: data.requireInteraction || false
+    requireInteraction: data.requireInteraction || false,
+    tag: data.tag || 'sigme-' + Date.now()
   };
 
   event.waitUntil(
     self.registration.showNotification(data.title || 'Notification', options)
+      .then(() => trackEvent('delivered', data.notificationId))
   );
-
-  // Track delivery
-  if (data.notificationId) {
-    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        websiteId: SIGME_CONFIG.websiteId,
-        notificationId: data.notificationId,
-        event: 'delivered'
-      })
-    }).catch(() => {});
-  }
 });
 
-// Handle notification clicks
-self.addEventListener('notificationclick', function(event) {
-  console.log('[Sigme SW] Notification clicked:', event);
+// Click
+self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-
   const data = event.notification.data || {};
-  
-  // Track click
-  if (data.notificationId) {
-    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        websiteId: SIGME_CONFIG.websiteId,
-        notificationId: data.notificationId,
-        event: 'clicked',
-        action: event.action || 'default'
-      })
-    }).catch(() => {});
-  }
-
-  // Open URL
-  const urlToOpen = data.url || '/';
   event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true })
-      .then(function(clientList) {
-        for (const client of clientList) {
-          if (client.url === urlToOpen && 'focus' in client) {
-            return client.focus();
+    trackEvent('clicked', data.notificationId, event.action).then(() => {
+      const urlToOpen = data.url || '/';
+      return self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+        .then((clients) => {
+          for (const client of clients) {
+            if (client.url.includes(urlToOpen) && 'focus' in client) return client.focus();
           }
-        }
-        if (clients.openWindow) {
-          return clients.openWindow(urlToOpen);
-        }
-      })
+          if (self.clients.openWindow) return self.clients.openWindow(urlToOpen);
+        });
+    })
   );
 });
 
-// Handle notification close
-self.addEventListener('notificationclose', function(event) {
+// Close
+self.addEventListener('notificationclose', (event) => {
   const data = event.notification.data || {};
-  
-  // Track dismissal
-  if (data.notificationId) {
-    fetch(\`\${SIGME_CONFIG.apiEndpoint}/track-notification\`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        websiteId: SIGME_CONFIG.websiteId,
-        notificationId: data.notificationId,
-        event: 'dismissed'
-      })
-    }).catch(() => {});
-  }
+  event.waitUntil(trackEvent('dismissed', data.notificationId));
 });
+
+log('Service Worker ready');
 ` : "";
 
-  // Integration script template with actual Supabase URLs
+  // Minimal integration script
   const integrationScript = generatedWebsite ? `<!-- Sigme Push Notifications -->
-<!-- Add this before </body> on your website -->
 <script>
 (function() {
-  const SIGME_CONFIG = {
+  var config = {
     websiteId: '${generatedWebsite.id}',
-    vapidPublicKey: '${generatedWebsite.vapidPublicKey}',
-    apiEndpoint: '${supabaseUrl}/functions/v1',
-    serviceWorkerPath: '/sigme-sw.js'
+    vapid: '${generatedWebsite.vapidPublicKey}',
+    api: '${supabaseUrl}/functions/v1',
+    key: '${supabaseAnonKey}'
   };
 
-  // Check browser support
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-    console.warn('[Sigme] Push notifications not supported');
+    console.warn('[Sigme] Push not supported');
     return;
   }
 
-  // Register service worker
-  navigator.serviceWorker.register(SIGME_CONFIG.serviceWorkerPath, { scope: '/' })
+  var swUrl = '/sigme-sw.js?' +
+    'websiteId=' + encodeURIComponent(config.websiteId) +
+    '&vapid=' + encodeURIComponent(config.vapid) +
+    '&api=' + encodeURIComponent(config.api) +
+    '&key=' + encodeURIComponent(config.key);
+
+  navigator.serviceWorker.register(swUrl, { scope: '/' })
+    .then(function() { return navigator.serviceWorker.ready; })
     .then(function(reg) {
-      console.log('[Sigme] Service Worker registered');
-      return navigator.serviceWorker.ready.then(function() {
-        return reg;
-      });
-    })
-    .then(function(registration) {
-      console.log('[Sigme] Service Worker ready:', registration.scope);
-
-      const ensurePermission = function() {
-        if (Notification.permission === 'granted') return Promise.resolve('granted');
-        if (Notification.permission === 'denied') return Promise.resolve('denied');
-        return Notification.requestPermission();
-      };
-
-      return ensurePermission().then(function(permission) {
-        if (permission !== 'granted') {
-          console.log('[Sigme] Notification permission not granted:', permission);
-          return null;
-        }
-
-        const applicationServerKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
-
-        return registration.pushManager.getSubscription()
-          .then(function(existingSub) {
-            if (!existingSub) {
-              console.log('[Sigme] No existing subscription found');
-              return;
-            }
-            console.log('[Sigme] Existing subscription found, unsubscribing...');
-            return existingSub.unsubscribe()
-              .then(function(ok) {
-                console.log('[Sigme] Existing subscription unsubscribed:', ok);
-              })
-              .catch(function(err) {
-                console.warn('[Sigme] Failed to unsubscribe existing subscription (continuing):', err);
-              });
-          })
-          .then(function() {
-            console.log('[Sigme] Subscribing with current VAPID key...');
-            return registration.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey: applicationServerKey
-            }).catch(function(err) {
-              if (err && err.name === 'InvalidStateError') {
-                console.warn('[Sigme] InvalidStateError on subscribe; retrying unsubscribe+subscribe once');
-                return registration.pushManager.getSubscription()
-                  .then(function(sub) { return sub ? sub.unsubscribe() : null; })
-                  .catch(function(e) { console.warn('[Sigme] Retry unsubscribe failed (continuing):', e); })
-                  .then(function() {
-                    return registration.pushManager.subscribe({
-                      userVisibleOnly: true,
-                      applicationServerKey: applicationServerKey
-                    });
-                  });
-              }
-              throw err;
-            });
-          });
-      });
-    })
-    .then(function(subscription) {
-      if (!subscription) return;
-      
-      // Send subscription to Sigme backend
-      return fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': '${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}',
-          'Authorization': 'Bearer ' + '${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}',
-        },
-        body: JSON.stringify({
-          websiteId: SIGME_CONFIG.websiteId,
-          subscription: subscription.toJSON ? subscription.toJSON() : subscription,
-          userAgent: navigator.userAgent,
-          language: navigator.language,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-        })
-      });
-    })
-    .then(function(response) {
-      if (response && response.ok) {
-        console.log('[Sigme] Subscriber registered successfully');
+      console.log('[Sigme] SW ready');
+      if (Notification.permission === 'granted') {
+        reg.active?.postMessage({ type: 'SIGME_SUBSCRIBE' });
+      } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then(function(p) {
+          if (p === 'granted') reg.active?.postMessage({ type: 'SIGME_SUBSCRIBE' });
+        });
       }
     })
-    .catch(function(error) {
-      console.error('[Sigme] Error:', error);
-    });
+    .catch(function(e) { console.error('[Sigme] Error:', e); });
 
-  // Helper function for VAPID key conversion
-  // Converts base64url to Uint8Array for applicationServerKey
-  function urlBase64ToUint8Array(base64String) {
-    const padding = '='.repeat((4 - base64String.length % 4) % 4);
-    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-    const rawData = window.atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) {
-      outputArray[i] = rawData.charCodeAt(i);
+  navigator.serviceWorker.addEventListener('message', function(e) {
+    if (e.data?.type === 'SIGME_SUBSCRIBED') {
+      console.log('[Sigme] ' + (e.data.success ? '✓ Subscribed!' : 'Subscription failed'));
     }
-    return outputArray;
-  }
+  });
 })();
 </script>` : "";
 
@@ -498,15 +607,15 @@ self.addEventListener('notificationclose', function(event) {
                   onChange={(e) => setUrl(e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  The full URL of your website (including https://)
+                  The full URL of your website including https://
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="description">Description (Optional)</Label>
+                <Label htmlFor="description">Description (optional)</Label>
                 <Textarea
                   id="description"
-                  placeholder="Brief description of this website..."
+                  placeholder="Brief description of your website..."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={3}
@@ -514,20 +623,16 @@ self.addEventListener('notificationclose', function(event) {
               </div>
 
               <Button
-                variant="hero"
-                className="w-full"
-                disabled={!isStep1Valid || isGenerating}
                 onClick={handleStep1Submit}
+                disabled={!isStep1Valid || isGenerating}
+                className="w-full"
               >
                 {isGenerating ? (
-                  <>
-                    <Sparkles className="w-4 h-4 mr-2 animate-pulse" />
-                    Generating Secure Keys...
-                  </>
+                  <>Generating Keys...</>
                 ) : (
                   <>
-                    Generate Keys
-                    <ArrowRight className="w-4 h-4 ml-2" />
+                    Generate VAPID Keys
+                    <Key className="w-4 h-4 ml-2" />
                   </>
                 )}
               </Button>
@@ -537,142 +642,127 @@ self.addEventListener('notificationclose', function(event) {
 
         {/* Step 2: Keys Generated */}
         {step === 2 && generatedWebsite && (
-          <div className="space-y-6">
-            <div className="p-8 rounded-2xl bg-card border border-border/50">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 rounded-xl bg-success/10 flex items-center justify-center">
-                  <Key className="w-6 h-6 text-success" />
-                </div>
-                <div>
-                  <h2 className="text-xl font-semibold text-foreground">Keys Generated!</h2>
-                  <p className="text-sm text-muted-foreground">Your VAPID keys and API token are ready</p>
-                </div>
+          <div className="p-8 rounded-2xl bg-card border border-border/50">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-12 h-12 rounded-xl bg-success/10 flex items-center justify-center">
+                <Check className="w-6 h-6 text-success" />
               </div>
-
-              <div className="space-y-4">
-                <div className="p-4 rounded-lg bg-muted/50">
-                  <Label className="text-xs text-muted-foreground">Website ID</Label>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="flex-1 font-mono text-sm">{generatedWebsite.id}</code>
-                    <Button variant="ghost" size="icon" onClick={() => copyToClipboard(generatedWebsite.id, "Website ID")}>
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-lg bg-muted/50">
-                  <Label className="text-xs text-muted-foreground">Public VAPID Key (for browser subscription)</Label>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="flex-1 font-mono text-xs break-all">{generatedWebsite.vapidPublicKey}</code>
-                    <Button variant="ghost" size="icon" onClick={() => copyToClipboard(generatedWebsite.vapidPublicKey, "Public VAPID Key")}>
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    ✓ Valid P-256 public key (starts with 'B')
-                  </p>
-                </div>
-
-                <div className="p-4 rounded-lg bg-muted/50">
-                  <Label className="text-xs text-muted-foreground">API Token</Label>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="flex-1 font-mono text-sm">{generatedWebsite.apiToken}</code>
-                    <Button variant="ghost" size="icon" onClick={() => copyToClipboard(generatedWebsite.apiToken, "API Token")}>
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="p-3 rounded-lg bg-primary/5 border border-primary/10">
-                  <p className="text-xs text-muted-foreground">
-                    <strong>Security Note:</strong> Your private VAPID key is securely stored on our servers 
-                    and is never exposed to the frontend. It's used only for signing push notifications.
-                  </p>
-                </div>
+              <div>
+                <h2 className="text-xl font-semibold text-foreground">Keys Generated!</h2>
+                <p className="text-sm text-muted-foreground">Your VAPID keys are ready</p>
               </div>
-
-              <Button variant="hero" className="w-full mt-6" onClick={() => setStep(3)}>
-                Continue to Integration
-                <ArrowRight className="w-4 h-4 ml-2" />
-              </Button>
             </div>
+
+            <div className="space-y-4 mb-6">
+              <div className="p-4 rounded-lg bg-muted/50">
+                <Label className="text-xs text-muted-foreground">Website ID</Label>
+                <div className="flex items-center gap-2 mt-1">
+                  <code className="text-sm font-mono flex-1 break-all">{generatedWebsite.id}</code>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => copyToClipboard(generatedWebsite.id, "Website ID")}
+                  >
+                    <Copy className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-lg bg-muted/50">
+                <Label className="text-xs text-muted-foreground">Public VAPID Key</Label>
+                <div className="flex items-center gap-2 mt-1">
+                  <code className="text-xs font-mono flex-1 break-all">{generatedWebsite.vapidPublicKey}</code>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => copyToClipboard(generatedWebsite.vapidPublicKey, "Public Key")}
+                  >
+                    <Copy className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <Button onClick={() => setStep(3)} className="w-full">
+              Continue to Integration
+              <ArrowRight className="w-4 h-4 ml-2" />
+            </Button>
           </div>
         )}
 
-        {/* Step 3: Integration Code */}
+        {/* Step 3: Integration */}
         {step === 3 && generatedWebsite && (
           <div className="space-y-6">
-            <div className="p-8 rounded-2xl bg-card border border-border/50">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
-                  <Code className="w-6 h-6 text-primary" />
-                </div>
-                <div>
-                  <h2 className="text-xl font-semibold text-foreground">Integration Code</h2>
-                  <p className="text-sm text-muted-foreground">Add these files to your website</p>
-                </div>
-              </div>
-
-              {/* Service Worker */}
-              <div className="space-y-3 mb-6">
-                <div className="flex items-center justify-between">
-                  <Label>1. Service Worker (sigme-sw.js)</Label>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        const blob = new Blob([serviceWorkerCode], { type: "application/javascript" });
-                        const downloadUrl = URL.createObjectURL(blob);
-                        const a = document.createElement("a");
-                        a.href = downloadUrl;
-                        a.download = "sigme-sw.js";
-                        a.click();
-                      }}
-                    >
-                      <Download className="w-4 h-4 mr-2" />
-                      Download
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => copyToClipboard(serviceWorkerCode, "Service Worker")}>
-                      <Copy className="w-4 h-4 mr-2" />
-                      Copy
-                    </Button>
+            {/* Service Worker */}
+            <div className="p-6 rounded-xl bg-card border border-border/50">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <Code className="w-5 h-5 text-primary" />
+                  <div>
+                    <h3 className="font-semibold">Service Worker</h3>
+                    <p className="text-sm text-muted-foreground">Save as sigme-sw.js in root folder</p>
                   </div>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Place this file in your website's root directory (e.g., /sigme-sw.js)
-                </p>
-                <div className="relative">
-                  <pre className="p-4 rounded-lg bg-muted/50 text-xs font-mono overflow-x-auto max-h-64 overflow-y-auto">
-                    {serviceWorkerCode}
-                  </pre>
-                </div>
-              </div>
-
-              {/* Integration Script */}
-              <div className="space-y-3 mb-6">
-                <div className="flex items-center justify-between">
-                  <Label>2. Integration Script</Label>
-                  <Button variant="outline" size="sm" onClick={() => copyToClipboard(integrationScript, "Integration Script")}>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const blob = new Blob([serviceWorkerCode], { type: "application/javascript" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = "sigme-sw.js";
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Download
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => copyToClipboard(serviceWorkerCode, "Service Worker")}
+                  >
                     <Copy className="w-4 h-4 mr-2" />
                     Copy
                   </Button>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Add this script before the closing &lt;/body&gt; tag on your website
-                </p>
-                <div className="relative">
-                  <pre className="p-4 rounded-lg bg-muted/50 text-xs font-mono overflow-x-auto max-h-64 overflow-y-auto">
-                    {integrationScript}
-                  </pre>
-                </div>
               </div>
-
-              <Button variant="hero" className="w-full" onClick={handleComplete}>
-                <Check className="w-4 h-4 mr-2" />
-                Complete Setup
-              </Button>
+              <pre className="p-4 rounded-lg bg-muted/50 overflow-x-auto text-xs max-h-[200px] overflow-y-auto">
+                <code>{serviceWorkerCode}</code>
+              </pre>
             </div>
+
+            {/* Integration Script */}
+            <div className="p-6 rounded-xl bg-card border border-border/50">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <Code className="w-5 h-5 text-primary" />
+                  <div>
+                    <h3 className="font-semibold">Integration Script</h3>
+                    <p className="text-sm text-muted-foreground">Add before &lt;/body&gt; on every page</p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => copyToClipboard(integrationScript, "Integration Script")}
+                >
+                  <Copy className="w-4 h-4 mr-2" />
+                  Copy
+                </Button>
+              </div>
+              <pre className="p-4 rounded-lg bg-muted/50 overflow-x-auto text-xs max-h-[200px] overflow-y-auto">
+                <code>{integrationScript}</code>
+              </pre>
+            </div>
+
+            <Button onClick={handleComplete} className="w-full">
+              Complete Setup
+              <Check className="w-4 h-4 ml-2" />
+            </Button>
           </div>
         )}
       </div>
