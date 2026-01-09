@@ -1,46 +1,72 @@
 /**
- * Send Notification Edge Function
+ * Send Notification Edge Function v2
  * 
- * PRODUCTION-READY push notification engine supporting:
- * - Web Push with proper VAPID JWT signing (RFC 8292)
+ * Production-ready push notification engine:
+ * - Web Push with VAPID JWT signing (RFC 8292)
  * - FCM HTTP v1 API for Android
- * 
- * Features:
- * - Batch sending with configurable size
- * - Retry logic with exponential backoff
- * - Token cleanup for failed subscriptions
- * - Comprehensive delivery logging
+ * - Proper CORS handling
+ * - Health check endpoint
+ * - Comprehensive error handling
  */
 
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// FCM HTTP v1 API endpoint template
-const FCM_V1_ENDPOINT = 'https://fcm.googleapis.com/v1/projects/{project_id}/messages:send';
-
-// Cache for FCM access token
-let fcmAccessToken: { token: string; expires: number } | null = null;
+// FCM token cache
+let fcmAccessToken: string | null = null;
+let fcmTokenExpiry = 0;
 
 // Configuration
-const BATCH_SIZE = 100;
-const MAX_RETRIES = 3;
-const RETRY_DELAYS = [1000, 5000, 15000];
+const BATCH_SIZE = 50;
+const MAX_RETRIES = 2;
 
-serve(async (req) => {
+Deno.serve(async (req) => {
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const url = new URL(req.url);
+
+  // Health check endpoint
+  if (req.method === 'GET' && (url.pathname.endsWith('/health') || url.pathname === '/send-notification')) {
+    return new Response(
+      JSON.stringify({ 
+        status: 'healthy', 
+        timestamp: new Date().toISOString(),
+        version: '2.0.0'
+      }),
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (req.method !== 'POST') {
+    return new Response(
+      JSON.stringify({ error: 'Method not allowed' }),
+      { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
   try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    
+    if (!supabaseUrl || !supabaseServiceKey) {
+      console.error('[SendNotification] Missing environment variables');
+      return new Response(
+        JSON.stringify({ error: 'Server configuration error' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    // Validate authorization
     const authHeader = req.headers.get('authorization');
     if (!authHeader) {
       return new Response(
@@ -49,10 +75,19 @@ serve(async (req) => {
       );
     }
 
-    const body = await req.json();
+    let body;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON body' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const { campaignId, websiteId, notification, targetSubscriberIds } = body;
 
-    console.log('[SendNotification] Starting for campaign:', campaignId, 'website:', websiteId);
+    console.log('[SendNotification] Request received:', { campaignId, websiteId, hasNotification: !!notification });
 
     if (!websiteId || !notification) {
       return new Response(
@@ -69,6 +104,7 @@ serve(async (req) => {
       .single();
 
     if (websiteError || !website) {
+      console.error('[SendNotification] Website not found:', websiteId, websiteError);
       return new Response(
         JSON.stringify({ error: 'Website not found' }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -89,6 +125,7 @@ serve(async (req) => {
     const { data: subscribers, error: subscribersError } = await subscribersQuery;
 
     if (subscribersError) {
+      console.error('[SendNotification] Subscribers fetch error:', subscribersError);
       return new Response(
         JSON.stringify({ error: 'Failed to fetch subscribers' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -96,6 +133,7 @@ serve(async (req) => {
     }
 
     if (!subscribers || subscribers.length === 0) {
+      console.log('[SendNotification] No active subscribers found');
       return new Response(
         JSON.stringify({ success: true, sent: 0, failed: 0, message: 'No active subscribers' }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -105,8 +143,12 @@ serve(async (req) => {
     console.log(`[SendNotification] Sending to ${subscribers.length} subscribers`);
 
     // Separate by platform
-    const webSubscribers = subscribers.filter((s: any) => s.platform === 'web' && s.endpoint);
-    const androidSubscribers = subscribers.filter((s: any) => s.platform === 'android' && s.fcm_token);
+    const webSubscribers = subscribers.filter((s: any) => 
+      (s.platform === 'web' || !s.platform) && s.endpoint && s.p256dh_key && s.auth_key
+    );
+    const androidSubscribers = subscribers.filter((s: any) => 
+      s.platform === 'android' && s.fcm_token
+    );
 
     console.log(`[SendNotification] Web: ${webSubscribers.length}, Android: ${androidSubscribers.length}`);
 
@@ -114,69 +156,75 @@ serve(async (req) => {
     let failedCount = 0;
     const failedSubscriberIds: string[] = [];
 
-    // Process Web Push subscribers
+    // Process Web Push subscribers in batches
     for (let i = 0; i < webSubscribers.length; i += BATCH_SIZE) {
       const batch = webSubscribers.slice(i, i + BATCH_SIZE);
       
       const results = await Promise.allSettled(
-        batch.map((subscriber: any) => sendWithRetry(
-          () => sendWebPushNotification(
+        batch.map((subscriber: any) => 
+          sendWebPushWithRetry(
             subscriber,
             notification,
             website.vapid_public_key,
             website.vapid_private_key,
             website.url
-          ),
-          MAX_RETRIES,
-          subscriber.id
-        ))
+          )
+        )
       );
 
-      results.forEach((result, idx) => {
-        const subscriber = batch[idx];
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        const subscriber = batch[j];
+        
         if (result.status === 'fulfilled' && result.value.success) {
           sentCount++;
-          logNotification(supabase, campaignId, subscriber.id, websiteId, 'sent', 'web');
+          await logNotification(supabase, campaignId, subscriber.id, websiteId, 'sent', 'web');
         } else {
           failedCount++;
-          const error = result.status === 'rejected' ? result.reason : result.value.error;
-          logNotification(supabase, campaignId, subscriber.id, websiteId, 'failed', 'web', String(error));
+          const error = result.status === 'rejected' 
+            ? String(result.reason) 
+            : result.value.error || 'Unknown error';
+          await logNotification(supabase, campaignId, subscriber.id, websiteId, 'failed', 'web', error);
+          
           if (isExpiredSubscription(error)) {
             failedSubscriberIds.push(subscriber.id);
           }
         }
-      });
+      }
     }
 
-    // Process Android subscribers
+    // Process Android subscribers in batches
     for (let i = 0; i < androidSubscribers.length; i += BATCH_SIZE) {
       const batch = androidSubscribers.slice(i, i + BATCH_SIZE);
       
       const results = await Promise.allSettled(
-        batch.map((subscriber: any) => sendWithRetry(
-          () => sendFCMNotification(subscriber.fcm_token, notification),
-          MAX_RETRIES,
-          subscriber.id
-        ))
+        batch.map((subscriber: any) => 
+          sendFCMNotification(subscriber.fcm_token, notification)
+        )
       );
 
-      results.forEach((result, idx) => {
-        const subscriber = batch[idx];
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        const subscriber = batch[j];
+        
         if (result.status === 'fulfilled' && result.value.success) {
           sentCount++;
-          logNotification(supabase, campaignId, subscriber.id, websiteId, 'sent', 'android');
+          await logNotification(supabase, campaignId, subscriber.id, websiteId, 'sent', 'android');
         } else {
           failedCount++;
-          const error = result.status === 'rejected' ? result.reason : result.value.error;
-          logNotification(supabase, campaignId, subscriber.id, websiteId, 'failed', 'android', String(error));
+          const error = result.status === 'rejected' 
+            ? String(result.reason) 
+            : result.value.error || 'Unknown error';
+          await logNotification(supabase, campaignId, subscriber.id, websiteId, 'failed', 'android', error);
+          
           if (isExpiredSubscription(error)) {
             failedSubscriberIds.push(subscriber.id);
           }
         }
-      });
+      }
     }
 
-    // Mark expired subscriptions
+    // Mark expired subscriptions as inactive
     if (failedSubscriberIds.length > 0) {
       await supabase
         .from('subscribers')
@@ -199,7 +247,7 @@ serve(async (req) => {
       })
       .eq('id', websiteId);
 
-    console.log(`[SendNotification] Done: ${sentCount} sent, ${failedCount} failed`);
+    console.log(`[SendNotification] Completed: ${sentCount} sent, ${failedCount} failed`);
 
     return new Response(
       JSON.stringify({
@@ -212,50 +260,530 @@ serve(async (req) => {
     );
 
   } catch (error) {
-    console.error('[SendNotification] Error:', error);
+    console.error('[SendNotification] Unhandled error:', error);
     return new Response(
-      JSON.stringify({ error: 'Internal server error' }),
+      JSON.stringify({ error: 'Internal server error', details: String(error) }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
 });
 
-// Retry wrapper
-async function sendWithRetry(
-  sendFn: () => Promise<{ success: boolean; error?: string }>,
-  maxRetries: number,
-  subscriberId: string
+// ============ Helper Functions ============
+
+async function sendWebPushWithRetry(
+  subscriber: any,
+  notification: any,
+  vapidPublicKey: string,
+  vapidPrivateKey: string,
+  websiteUrl: string,
+  retries = MAX_RETRIES
 ): Promise<{ success: boolean; error?: string }> {
   let lastError = '';
   
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const result = await sendFn();
+      const result = await sendWebPushNotification(
+        subscriber,
+        notification,
+        vapidPublicKey,
+        vapidPrivateKey,
+        websiteUrl
+      );
+      
       if (result.success) return result;
       lastError = result.error || 'Unknown error';
+      
+      // Don't retry permanent failures
       if (isPermanentFailure(lastError)) return result;
-      if (attempt < maxRetries) {
-        await sleep(RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)]);
+      
+      if (attempt < retries) {
+        await sleep(1000 * (attempt + 1)); // Simple backoff
       }
     } catch (err) {
       lastError = String(err);
-      if (attempt < maxRetries) {
-        await sleep(RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)]);
+      if (attempt < retries) {
+        await sleep(1000 * (attempt + 1));
       }
     }
   }
+  
   return { success: false, error: lastError };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function sendWebPushNotification(
+  subscriber: any,
+  notification: any,
+  vapidPublicKey: string,
+  vapidPrivateKey: string,
+  websiteUrl: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { endpoint, p256dh_key, auth_key } = subscriber;
+
+    if (!endpoint || !p256dh_key || !auth_key) {
+      return { success: false, error: 'Missing subscription credentials' };
+    }
+
+    const payload = JSON.stringify({
+      title: notification.title,
+      body: notification.body,
+      icon: notification.icon || '/icon-192x192.png',
+      image: notification.image,
+      url: notification.url || '/',
+      actions: notification.actions || [],
+      notificationId: notification.notificationId || `notif-${Date.now()}`,
+      timestamp: Date.now(),
+    });
+
+    const audience = new URL(endpoint).origin;
+    const vapidJwt = await createVapidJwt(audience, vapidPrivateKey, websiteUrl);
+
+    const encryptedBody = await encryptPayload(payload, p256dh_key, auth_key);
+
+    // Create proper ArrayBuffer for fetch body
+    const bodyBuffer = new ArrayBuffer(encryptedBody.length);
+    new Uint8Array(bodyBuffer).set(encryptedBody);
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Encoding': 'aes128gcm',
+        'TTL': '86400',
+        'Urgency': 'high',
+        'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
+      },
+      body: bodyBuffer,
+    });
+
+    if (response.ok || response.status === 201) {
+      return { success: true };
+    }
+
+    const status = response.status;
+    if (status === 404 || status === 410) {
+      return { success: false, error: 'SUBSCRIPTION_EXPIRED' };
+    }
+    if (status === 401 || status === 403) {
+      const text = await response.text();
+      console.error('[WebPush] Auth failed:', status, text);
+      return { success: false, error: `VAPID_AUTH_FAILED: ${text}` };
+    }
+
+    const errorText = await response.text();
+    console.error('[WebPush] Failed:', status, errorText);
+    return { success: false, error: `HTTP_${status}: ${errorText}` };
+  } catch (error) {
+    console.error('[WebPush] Exception:', error);
+    return { success: false, error: String(error) };
+  }
 }
 
-function isPermanentFailure(error: string): boolean {
-  return ['SUBSCRIPTION_EXPIRED', 'UNREGISTERED', 'INVALID_ARGUMENT', 'NOT_FOUND'].some(e => error.includes(e));
+async function createVapidJwt(
+  audience: string,
+  privateKeyBase64: string,
+  subject: string
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  
+  const header = { typ: 'JWT', alg: 'ES256' };
+  
+  let sub = 'mailto:noreply@sigme.app';
+  try {
+    sub = subject.startsWith('mailto:')
+      ? subject
+      : `mailto:noreply@${new URL(subject).hostname}`;
+  } catch {
+    // keep fallback
+  }
+
+  const payload = {
+    aud: audience,
+    exp: now + 43200, // 12 hours
+    sub,
+  };
+
+  const headerB64 = base64UrlEncode(JSON.stringify(header));
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  const privateKey = await importVapidPrivateKey(privateKeyBase64);
+
+  const signature = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    privateKey,
+    new TextEncoder().encode(signingInput)
+  );
+
+  // Convert DER signature to raw format (64 bytes: r || s)
+  const rawSig = derToRaw(new Uint8Array(signature));
+  const signatureB64 = base64UrlEncode(rawSig);
+
+  return `${signingInput}.${signatureB64}`;
 }
 
-// Log notification
+async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKey> {
+  const privateKeyBytes = base64UrlDecode(privateKeyBase64);
+  
+  // PKCS8 format (longer than 32 bytes)
+  if (privateKeyBytes.length > 32) {
+    const keyBuffer = new ArrayBuffer(privateKeyBytes.length);
+    new Uint8Array(keyBuffer).set(privateKeyBytes);
+    
+    return await crypto.subtle.importKey(
+      'pkcs8',
+      keyBuffer,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['sign']
+    );
+  }
+  
+  // Raw 32-byte key - wrap in PKCS8
+  const pkcs8Header = new Uint8Array([
+    0x30, 0x41, 0x02, 0x01, 0x00, 0x30, 0x13,
+    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    0x04, 0x27, 0x30, 0x25, 0x02, 0x01, 0x01, 0x04, 0x20,
+  ]);
+
+  const pkcs8Key = new Uint8Array(pkcs8Header.length + 32);
+  pkcs8Key.set(pkcs8Header);
+  pkcs8Key.set(privateKeyBytes.slice(0, 32), pkcs8Header.length);
+
+  const keyBuffer = new ArrayBuffer(pkcs8Key.length);
+  new Uint8Array(keyBuffer).set(pkcs8Key);
+  
+  return await crypto.subtle.importKey(
+    'pkcs8',
+    keyBuffer,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign']
+  );
+}
+
+// Convert DER-encoded ECDSA signature to raw format
+function derToRaw(der: Uint8Array): Uint8Array {
+  // DER format: 0x30 <len> 0x02 <rLen> <r> 0x02 <sLen> <s>
+  // Raw format: <r padded to 32 bytes><s padded to 32 bytes>
+  
+  let offset = 2; // Skip 0x30 and length
+  
+  // Parse R
+  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected 0x02 for R');
+  offset++;
+  const rLen = der[offset++];
+  let r = der.slice(offset, offset + rLen);
+  offset += rLen;
+  
+  // Parse S
+  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected 0x02 for S');
+  offset++;
+  const sLen = der[offset++];
+  let s = der.slice(offset, offset + sLen);
+  
+  // Remove leading zeros and pad to 32 bytes
+  while (r.length > 32 && r[0] === 0) r = r.slice(1);
+  while (s.length > 32 && s[0] === 0) s = s.slice(1);
+  
+  const raw = new Uint8Array(64);
+  raw.set(r, 32 - r.length);
+  raw.set(s, 64 - s.length);
+  
+  return raw;
+}
+
+// Web Push payload encryption (RFC 8291)
+async function encryptPayload(
+  payload: string,
+  p256dhKey: string,
+  authKey: string
+): Promise<Uint8Array> {
+  const payloadBytes = new TextEncoder().encode(payload);
+  const userPublicKeyBytes = base64UrlDecode(p256dhKey);
+  const authSecretBytes = base64UrlDecode(authKey);
+
+  // Helper to create proper ArrayBuffer (required for Deno's strict types)
+  const toBuffer = (arr: Uint8Array): ArrayBuffer => {
+    const buf = new ArrayBuffer(arr.length);
+    new Uint8Array(buf).set(arr);
+    return buf;
+  };
+
+  // Generate ephemeral key pair
+  const ephemeralKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  );
+
+  // Import user's public key
+  const userPublicKey = await crypto.subtle.importKey(
+    'raw',
+    toBuffer(userPublicKeyBytes),
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    []
+  );
+
+  // Derive shared secret
+  const sharedSecret = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: userPublicKey },
+    ephemeralKeyPair.privateKey,
+    256
+  );
+
+  // Export ephemeral public key
+  const ephemeralPublicKey = await crypto.subtle.exportKey('raw', ephemeralKeyPair.publicKey);
+  const ephemeralPublicKeyBytes = new Uint8Array(ephemeralPublicKey);
+
+  // HKDF to derive encryption key and nonce
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  
+  // info for key derivation
+  const keyInfo = createInfo('aesgcm', userPublicKeyBytes, ephemeralPublicKeyBytes);
+  const nonceInfo = createInfo('nonce', userPublicKeyBytes, ephemeralPublicKeyBytes);
+  
+  // PRK from auth secret and shared secret
+  const authInfo = new TextEncoder().encode('Content-Encoding: auth\0');
+  const prk = await hkdfExtract(authSecretBytes, new Uint8Array(sharedSecret));
+  const ikm = await hkdfExpand(prk, authInfo, 32);
+  
+  // Derive CEK and nonce
+  const keyPrk = await hkdfExtract(salt, ikm);
+  const cek = await hkdfExpand(keyPrk, keyInfo, 16);
+  const nonce = await hkdfExpand(keyPrk, nonceInfo, 12);
+
+  // Import CEK for AES-GCM
+  const aesKey = await crypto.subtle.importKey(
+    'raw',
+    toBuffer(cek),
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+
+  // Pad payload (add 2-byte padding length prefix)
+  const paddingLength = 0;
+  const paddedPayload = new Uint8Array(2 + paddingLength + payloadBytes.length);
+  paddedPayload[0] = (paddingLength >> 8) & 0xff;
+  paddedPayload[1] = paddingLength & 0xff;
+  paddedPayload.set(payloadBytes, 2 + paddingLength);
+
+  // Encrypt
+  const nonceBuf = new ArrayBuffer(nonce.length);
+  new Uint8Array(nonceBuf).set(nonce);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonceBuf },
+    aesKey,
+    paddedPayload
+  );
+
+  // Build aes128gcm encrypted content
+  // Header: salt (16) | rs (4) | idlen (1) | keyid (65)
+  const recordSize = 4096;
+  const header = new Uint8Array(16 + 4 + 1 + 65);
+  header.set(salt, 0);
+  header[16] = (recordSize >> 24) & 0xff;
+  header[17] = (recordSize >> 16) & 0xff;
+  header[18] = (recordSize >> 8) & 0xff;
+  header[19] = recordSize & 0xff;
+  header[20] = 65; // keyid length
+  header.set(ephemeralPublicKeyBytes, 21);
+
+  // Combine header and ciphertext
+  const result = new Uint8Array(header.length + ciphertext.byteLength);
+  result.set(header);
+  result.set(new Uint8Array(ciphertext), header.length);
+
+  return result;
+}
+
+function createInfo(type: string, userPublicKey: Uint8Array, ephemeralKey: Uint8Array): Uint8Array {
+  const typeBytes = new TextEncoder().encode(`Content-Encoding: ${type}\0`);
+  const p256Bytes = new TextEncoder().encode('P-256\0');
+  
+  const info = new Uint8Array(
+    typeBytes.length + p256Bytes.length + 2 + userPublicKey.length + 2 + ephemeralKey.length
+  );
+  
+  let offset = 0;
+  info.set(typeBytes, offset); offset += typeBytes.length;
+  info.set(p256Bytes, offset); offset += p256Bytes.length;
+  info[offset++] = 0; info[offset++] = 65;
+  info.set(userPublicKey, offset); offset += userPublicKey.length;
+  info[offset++] = 0; info[offset++] = 65;
+  info.set(ephemeralKey, offset);
+  
+  return info;
+}
+
+async function hkdfExtract(salt: Uint8Array, ikm: Uint8Array): Promise<Uint8Array> {
+  const saltBuf = new ArrayBuffer(salt.length);
+  new Uint8Array(saltBuf).set(salt);
+  const ikmBuf = new ArrayBuffer(ikm.length);
+  new Uint8Array(ikmBuf).set(ikm);
+  const key = await crypto.subtle.importKey('raw', saltBuf, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const prk = await crypto.subtle.sign('HMAC', key, ikmBuf);
+  return new Uint8Array(prk);
+}
+
+async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
+  const prkBuf = new ArrayBuffer(prk.length);
+  new Uint8Array(prkBuf).set(prk);
+  const key = await crypto.subtle.importKey('raw', prkBuf, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const input = new Uint8Array(info.length + 1);
+  input.set(info);
+  input[info.length] = 1;
+  const inputBuf = new ArrayBuffer(input.length);
+  new Uint8Array(inputBuf).set(input);
+  const okm = await crypto.subtle.sign('HMAC', key, inputBuf);
+  return new Uint8Array(okm).slice(0, length);
+}
+
+// FCM Notification
+async function sendFCMNotification(
+  fcmToken: string,
+  notification: any
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const accessToken = await getFCMAccessToken();
+    if (!accessToken) {
+      return { success: false, error: 'FCM not configured' };
+    }
+
+    const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
+    const serviceAccount = JSON.parse(serviceAccountJson!);
+    const projectId = serviceAccount.project_id;
+
+    const response = await fetch(
+      `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: {
+            token: fcmToken,
+            notification: {
+              title: notification.title,
+              body: notification.body,
+              image: notification.image,
+            },
+            android: {
+              priority: 'high',
+              notification: {
+                click_action: notification.url || 'OPEN_APP',
+              },
+            },
+            data: {
+              url: notification.url || '',
+            },
+          },
+        }),
+      }
+    );
+
+    if (response.ok) {
+      return { success: true };
+    }
+
+    const error = await response.text();
+    console.error('[FCM] Error:', response.status, error);
+    
+    if (response.status === 404 || error.includes('UNREGISTERED')) {
+      return { success: false, error: 'SUBSCRIPTION_EXPIRED' };
+    }
+    
+    return { success: false, error: `FCM_${response.status}: ${error}` };
+  } catch (error) {
+    console.error('[FCM] Exception:', error);
+    return { success: false, error: String(error) };
+  }
+}
+
+async function getFCMAccessToken(): Promise<string | null> {
+  if (fcmAccessToken && fcmTokenExpiry > Date.now()) {
+    return fcmAccessToken;
+  }
+
+  const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
+  if (!serviceAccountJson) {
+    console.log('[FCM] FCM_SERVICE_ACCOUNT_JSON not configured');
+    return null;
+  }
+
+  try {
+    const serviceAccount = JSON.parse(serviceAccountJson);
+    const now = Math.floor(Date.now() / 1000);
+
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const payload = {
+      iss: serviceAccount.client_email,
+      scope: 'https://www.googleapis.com/auth/firebase.messaging',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    };
+
+    const jwt = await createRSAJwt(header, payload, serviceAccount.private_key);
+
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
+    });
+
+    if (!response.ok) {
+      console.error('[FCM] Token error:', await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    fcmAccessToken = data.access_token;
+    fcmTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+
+    return fcmAccessToken;
+  } catch (error) {
+    console.error('[FCM] Token exception:', error);
+    return null;
+  }
+}
+
+async function createRSAJwt(header: any, payload: any, privateKeyPem: string): Promise<string> {
+  const headerB64 = base64UrlEncode(JSON.stringify(header));
+  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  // Import RSA private key
+  const pemBody = privateKeyPem
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s/g, '');
+  
+  const keyBytes = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
+  
+  const privateKey = await crypto.subtle.importKey(
+    'pkcs8',
+    keyBytes,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    privateKey,
+    new TextEncoder().encode(signingInput)
+  );
+
+  return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+// Utility functions
 async function logNotification(
   supabase: any,
   campaignId: string | null,
@@ -267,7 +795,7 @@ async function logNotification(
 ) {
   try {
     await supabase.from('notification_logs').insert({
-      campaign_id: campaignId,
+      campaign_id: campaignId || null,
       subscriber_id: subscriberId,
       website_id: websiteId,
       status,
@@ -280,7 +808,6 @@ async function logNotification(
   }
 }
 
-// Update campaign stats
 async function updateCampaignStats(supabase: any, campaignId: string, sent: number, failed: number) {
   try {
     const { data: campaign } = await supabase
@@ -305,510 +832,28 @@ async function updateCampaignStats(supabase: any, campaignId: string, sent: numb
   }
 }
 
-/**
- * Web Push Notification with proper VAPID JWT signing (RFC 8292)
- * 
- * This implementation creates a proper VAPID JWT for authorization
- * and sends the notification with correct headers.
- */
-async function sendWebPushNotification(
-  subscriber: any,
-  notification: any,
-  vapidPublicKey: string,
-  vapidPrivateKey: string,
-  websiteUrl: string
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    const endpoint = subscriber.endpoint;
-    const p256dh = subscriber.p256dh_key;
-    const auth = subscriber.auth_key;
-
-    if (!endpoint || !p256dh || !auth) {
-      return { success: false, error: 'Missing subscription credentials' };
-    }
-
-    const payloadJson = JSON.stringify({
-      title: notification.title,
-      body: notification.body,
-      icon: notification.icon || '/icon-192x192.png',
-      image: notification.image,
-      url: notification.url || '/',
-      actions: notification.actions || [],
-      notificationId: notification.notificationId,
-      timestamp: Date.now(),
-    });
-
-    const audience = new URL(endpoint).origin;
-    const vapidJwt = await createVapidJwt(audience, vapidPrivateKey, websiteUrl);
-
-    const { body } = await encryptWebPushAes128Gcm(
-      new TextEncoder().encode(payloadJson),
-      p256dh,
-      auth
-    );
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Encoding': 'aes128gcm',
-        'TTL': '86400',
-        'Urgency': 'high',
-        // VAPID (RFC 8292)
-        'Crypto-Key': `p256ecdsa=${vapidPublicKey}`,
-        'Authorization': `Bearer ${vapidJwt}`,
-      },
-      body: body as unknown as BodyInit,
-    });
-
-    if (response.ok || response.status === 201) {
-      return { success: true };
-    }
-
-    const status = response.status;
-    if (status === 404 || status === 410) {
-      return { success: false, error: 'SUBSCRIPTION_EXPIRED' };
-    }
-    if (status === 401 || status === 403) {
-      return { success: false, error: 'VAPID_AUTH_FAILED' };
-    }
-
-    const errorText = await response.text();
-    console.error('[WebPush] Failed:', status, errorText);
-    return { success: false, error: `HTTP_${status}` };
-  } catch (error) {
-    console.error('[WebPush] Error:', error);
-    return { success: false, error: String(error) };
-  }
+function isPermanentFailure(error: string): boolean {
+  const permanentCodes = ['SUBSCRIPTION_EXPIRED', 'UNREGISTERED', 'INVALID_ARGUMENT', 'NOT_FOUND'];
+  return permanentCodes.some(code => error.includes(code));
 }
 
-/**
- * Create VAPID JWT token for Web Push authorization (RFC 8292)
- * 
- * The private key should be a 32-byte raw P-256 private key in base64url format.
- */
-async function createVapidJwt(
-  audience: string, 
-  privateKeyBase64: string,
-  subject: string
-): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  
-  const header = {
-    typ: 'JWT',
-    alg: 'ES256',
-  };
-
-  let sub = 'mailto:noreply@example.com';
-  try {
-    sub = subject.startsWith('mailto:')
-      ? subject
-      : `mailto:noreply@${new URL(subject).hostname}`;
-  } catch {
-    // keep fallback
-  }
-
-  const payload = {
-    aud: audience,
-    exp: now + 43200, // 12 hours
-    sub,
-  };
-
-  const headerB64 = base64UrlEncode(JSON.stringify(header));
-  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const signingInput = `${headerB64}.${payloadB64}`;
-
-  // Import the private key (raw 32-byte P-256 private key)
-  const privateKey = await importVapidPrivateKey(privateKeyBase64);
-
-  // Sign the JWT
-  const signature = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: 'SHA-256' },
-    privateKey,
-    new TextEncoder().encode(signingInput)
-  );
-
-  // Convert signature to base64url
-  const signatureB64 = base64UrlEncode(new Uint8Array(signature));
-
-  return `${signingInput}.${signatureB64}`;
+function isExpiredSubscription(error: string): boolean {
+  return error.includes('SUBSCRIPTION_EXPIRED') || error.includes('UNREGISTERED') || error.includes('410');
 }
 
-/**
- * Import VAPID private key from base64url format
- * 
- * VAPID private keys are raw 32-byte P-256 scalars in base64url encoding.
- * We need to construct a JWK to import them with Web Crypto API.
- */
-async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKey> {
-  // Decode base64url private key (should be 32 bytes for P-256 or longer for PKCS8)
-  const privateKeyBytes = base64UrlDecode(privateKeyBase64);
-  
-  // Check if this is a PKCS8 formatted key (longer) or raw 32-byte key
-  if (privateKeyBytes.length > 32) {
-    // This is likely PKCS8 format from our key generator
-    try {
-      // Create a new ArrayBuffer to ensure correct type
-      const keyBuffer = new ArrayBuffer(privateKeyBytes.length);
-      const keyView = new Uint8Array(keyBuffer);
-      keyView.set(privateKeyBytes);
-      
-      return await crypto.subtle.importKey(
-        'pkcs8',
-        keyBuffer,
-        { name: 'ECDSA', namedCurve: 'P-256' },
-        false,
-        ['sign']
-      );
-    } catch (e) {
-      console.error('[VAPID] PKCS8 import failed:', e);
-      throw new Error('Failed to import VAPID private key (PKCS8 format)');
-    }
-  }
-  
-  // For raw 32-byte keys, we need to construct a PKCS8 wrapper
-  // PKCS8 structure for P-256:
-  // SEQUENCE {
-  //   INTEGER 0 (version)
-  //   SEQUENCE { OID ecPublicKey, OID prime256v1 }
-  //   OCTET STRING { ECPrivateKey }
-  // }
-  const pkcs8Header = new Uint8Array([
-    0x30, 0x41, // SEQUENCE, 65 bytes
-    0x02, 0x01, 0x00, // INTEGER 0 (version)
-    0x30, 0x13, // SEQUENCE, 19 bytes (algorithm identifier)
-    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // OID 1.2.840.10045.2.1 (ecPublicKey)
-    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, // OID 1.2.840.10045.3.1.7 (prime256v1)
-    0x04, 0x27, // OCTET STRING, 39 bytes
-    0x30, 0x25, // SEQUENCE, 37 bytes (ECPrivateKey)
-    0x02, 0x01, 0x01, // INTEGER 1 (version)
-    0x04, 0x20, // OCTET STRING, 32 bytes (private key)
-  ]);
-
-  const pkcs8Key = new Uint8Array(pkcs8Header.length + 32);
-  pkcs8Key.set(pkcs8Header);
-  pkcs8Key.set(privateKeyBytes.slice(0, 32), pkcs8Header.length);
-
-  try {
-    // Create a new ArrayBuffer to ensure correct type
-    const keyBuffer = new ArrayBuffer(pkcs8Key.length);
-    const keyView = new Uint8Array(keyBuffer);
-    keyView.set(pkcs8Key);
-    
-    return await crypto.subtle.importKey(
-      'pkcs8',
-      keyBuffer,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['sign']
-    );
-  } catch (e) {
-    console.error('[VAPID] Key import error:', e);
-    throw new Error('Failed to import VAPID private key');
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-type Bytes = Uint8Array<ArrayBuffer>;
-
-async function encryptWebPushAes128Gcm(
-  plaintext: Uint8Array,
-  userPublicKeyB64Url: string,
-  userAuthB64Url: string
-): Promise<{ body: Bytes; saltB64Url: string; dhB64Url: string }> {
-  const salt = crypto.getRandomValues(new Uint8Array(16)) as Bytes;
-
-  const userPublicKeyBytes = base64UrlDecode(userPublicKeyB64Url);
-  const userAuthSecret = base64UrlDecode(userAuthB64Url);
-
-  const serverKeyPair = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits']
-  );
-
-  const serverPublicKeyRaw = new Uint8Array(
-    await crypto.subtle.exportKey('raw', serverKeyPair.publicKey)
-  ) as Bytes;
-
-  const userPublicKey = await crypto.subtle.importKey(
-    'raw',
-    userPublicKeyBytes,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    []
-  );
-
-  const sharedSecret = new Uint8Array(
-    await crypto.subtle.deriveBits(
-      { name: 'ECDH', public: userPublicKey },
-      serverKeyPair.privateKey,
-      256
-    )
-  ) as Bytes;
-
-  const prk = await hkdfExtract(userAuthSecret, sharedSecret);
-  const ikm = await hkdfExpand(prk, new TextEncoder().encode('Content-Encoding: auth\0'), 32);
-  const prk2 = await hkdfExtract(salt, ikm);
-
-  const context = createWebPushContext(userPublicKeyBytes, serverPublicKeyRaw);
-  const cekInfo = concatBytes(new TextEncoder().encode('Content-Encoding: aes128gcm\0'), context);
-  const nonceInfo = concatBytes(new TextEncoder().encode('Content-Encoding: nonce\0'), context);
-
-  const cek = await hkdfExpand(prk2, cekInfo, 16);
-  const nonce = await hkdfExpand(prk2, nonceInfo, 12);
-
-  const paddedPlaintext = concatBytes(plaintext, new Uint8Array([0x02]));
-
-  const aesKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['encrypt']);
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, paddedPlaintext)
-  ) as Bytes;
-
-  const rs = 4096;
-  const rsBytes = new Uint8Array([
-    (rs >>> 24) & 0xff,
-    (rs >>> 16) & 0xff,
-    (rs >>> 8) & 0xff,
-    rs & 0xff,
-  ]) as Bytes;
-
-  const idLen = new Uint8Array([serverPublicKeyRaw.length]) as Bytes;
-  const header = concatBytes(concatBytes(concatBytes(salt, rsBytes), idLen), serverPublicKeyRaw);
-
-  return {
-    body: concatBytes(header, ciphertext),
-    saltB64Url: base64UrlEncode(salt),
-    dhB64Url: base64UrlEncode(serverPublicKeyRaw),
-  };
+function base64UrlEncode(input: string | Uint8Array): string {
+  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+  const base64 = btoa(String.fromCharCode(...bytes));
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function createWebPushContext(clientPublicKeyRaw: Bytes, serverPublicKeyRaw: Bytes): Bytes {
-  const label = new TextEncoder().encode('P-256\0');
-  const clientLen = uint16be(clientPublicKeyRaw.length);
-  const serverLen = uint16be(serverPublicKeyRaw.length);
-  return concatBytes(
-    concatBytes(
-      concatBytes(concatBytes(label, clientLen), clientPublicKeyRaw),
-      serverLen
-    ),
-    serverPublicKeyRaw
-  );
-}
-
-function uint16be(value: number): Bytes {
-  const buf = new ArrayBuffer(2);
-  const out = new Uint8Array(buf) as Bytes;
-  out[0] = (value >>> 8) & 0xff;
-  out[1] = value & 0xff;
-  return out;
-}
-
-function concatBytes(a: Uint8Array, b: Uint8Array): Bytes {
-  const buf = new ArrayBuffer(a.length + b.length);
-  const out = new Uint8Array(buf) as Bytes;
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-
-async function hkdfExtract(salt: Bytes, ikm: Bytes): Promise<Bytes> {
-  const key = await crypto.subtle.importKey('raw', salt, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const prk = await crypto.subtle.sign('HMAC', key, ikm);
-  return new Uint8Array(prk) as Bytes;
-}
-
-async function hkdfExpand(prk: Bytes, info: Uint8Array, length: number): Promise<Bytes> {
-  const key = await crypto.subtle.importKey('raw', prk, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-
-  const hashLen = 32;
-  const n = Math.ceil(length / hashLen);
-
-  let t = new Uint8Array(new ArrayBuffer(0)) as Bytes;
-  let okm = new Uint8Array(new ArrayBuffer(0)) as Bytes;
-
-  for (let i = 1; i <= n; i++) {
-    const input = concatBytes(concatBytes(t, info), new Uint8Array([i]));
-    t = new Uint8Array(await crypto.subtle.sign('HMAC', key, input)) as Bytes;
-    okm = concatBytes(okm, t);
-  }
-
-  return okm.slice(0, length) as Bytes;
-}
-
-function base64UrlEncode(data: string | Uint8Array): string {
-  let str: string;
-  if (typeof data === 'string') {
-    str = btoa(data);
-  } else {
-    let binary = '';
-    for (let i = 0; i < data.length; i++) {
-      binary += String.fromCharCode(data[i]);
-    }
-    str = btoa(binary);
-  }
-  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function base64UrlDecode(str: string): Bytes {
-  const padding = '='.repeat((4 - (str.length % 4)) % 4);
-  const base64 = (str + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = atob(base64);
-
-  const buf = new ArrayBuffer(rawData.length);
-  const out = new Uint8Array(buf) as Bytes;
-  for (let i = 0; i < rawData.length; ++i) {
-    out[i] = rawData.charCodeAt(i);
-  }
-  return out;
-}
-
-// FCM functions
-async function getFCMAccessToken(): Promise<string> {
-  if (fcmAccessToken && fcmAccessToken.expires > Date.now() + 300000) {
-    return fcmAccessToken.token;
-  }
-
-  const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
-  if (!serviceAccountJson) throw new Error('FCM_SERVICE_ACCOUNT_JSON not configured');
-
-  const serviceAccount = JSON.parse(serviceAccountJson);
-  const { client_email, private_key } = serviceAccount;
-
-  if (!client_email || !private_key) throw new Error('FCM service account missing fields');
-
-  const now = Math.floor(Date.now() / 1000);
-  const jwt = await createFCMJwt({
-    iss: client_email,
-    sub: client_email,
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600,
-    scope: 'https://www.googleapis.com/auth/firebase.messaging',
-  }, private_key);
-
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: jwt,
-    }),
-  });
-
-  if (!response.ok) throw new Error('Failed to get FCM access token');
-
-  const tokenData = await response.json();
-  fcmAccessToken = {
-    token: tokenData.access_token,
-    expires: Date.now() + (tokenData.expires_in * 1000),
-  };
-
-  return tokenData.access_token;
-}
-
-async function createFCMJwt(payload: Record<string, any>, privateKeyPem: string): Promise<string> {
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const headerB64 = base64UrlEncode(JSON.stringify(header));
-  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const signingInput = `${headerB64}.${payloadB64}`;
-
-  const pemContents = privateKeyPem
-    .replace(/-----BEGIN PRIVATE KEY-----/, '')
-    .replace(/-----END PRIVATE KEY-----/, '')
-    .replace(/-----BEGIN RSA PRIVATE KEY-----/, '')
-    .replace(/-----END RSA PRIVATE KEY-----/, '')
-    .replace(/\s/g, '');
-
-  const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
-
-  const privateKey = await crypto.subtle.importKey(
-    'pkcs8',
-    binaryDer.buffer,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const signature = await crypto.subtle.sign(
-    { name: 'RSASSA-PKCS1-v1_5' },
-    privateKey,
-    new TextEncoder().encode(signingInput)
-  );
-
-  const signatureB64 = base64UrlEncode(new Uint8Array(signature));
-
-  return `${signingInput}.${signatureB64}`;
-}
-
-async function sendFCMNotification(
-  fcmToken: string,
-  notification: any
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
-    if (!serviceAccountJson) return { success: false, error: 'FCM not configured' };
-
-    const serviceAccount = JSON.parse(serviceAccountJson);
-    const projectId = serviceAccount.project_id;
-    if (!projectId) return { success: false, error: 'FCM project_id missing' };
-
-    const accessToken = await getFCMAccessToken();
-    const endpoint = FCM_V1_ENDPOINT.replace('{project_id}', projectId);
-
-    const message = {
-      message: {
-        token: fcmToken,
-        notification: {
-          title: notification.title,
-          body: notification.body,
-          image: notification.image,
-        },
-        android: {
-          priority: 'high',
-          notification: {
-            icon: notification.icon || 'ic_notification',
-            color: '#4285F4',
-            click_action: 'FLUTTER_NOTIFICATION_CLICK',
-            channel_id: 'default_channel',
-          },
-        },
-        data: {
-          url: notification.url || '/',
-          notificationId: notification.notificationId || '',
-        },
-      },
-    };
-
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(message),
-    });
-
-    if (response.ok) return { success: true };
-
-    const errorBody = await response.text();
-    console.error('[FCM] Failed:', response.status, errorBody);
-
-    if (response.status === 404 || errorBody.includes('UNREGISTERED') || errorBody.includes('INVALID_ARGUMENT')) {
-      return { success: false, error: 'SUBSCRIPTION_EXPIRED' };
-    }
-
-    return { success: false, error: `FCM_${response.status}` };
-
-  } catch (error) {
-    return { success: false, error: String(error) };
-  }
-}
-
-function isExpiredSubscription(error: any): boolean {
-  if (!error) return false;
-  const errorStr = String(error);
-  return errorStr.includes('SUBSCRIPTION_EXPIRED') ||
-         errorStr.includes('UNREGISTERED') ||
-         errorStr.includes('NOT_FOUND') ||
-         errorStr.includes('410');
+function base64UrlDecode(input: string): Uint8Array {
+  let base64 = input.replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4) base64 += '=';
+  const binary = atob(base64);
+  return Uint8Array.from(binary, c => c.charCodeAt(0));
 }
