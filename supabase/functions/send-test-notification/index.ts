@@ -1,74 +1,111 @@
 /**
- * Send Test Notification Edge Function
+ * Send Test Notification Edge Function v2
  * 
- * PRODUCTION-READY test notification sender that:
- * - Sends real push notifications via Web Push or FCM
- * - Uses proper VAPID signing for Web Push (RFC 8292)
- * - Logs delivery status for debugging
- * 
- * This is for testing individual subscriber notifications.
+ * Sends test push notifications to individual subscribers.
+ * - Proper CORS handling
+ * - Health check endpoint
+ * - Web Push with VAPID signing
+ * - FCM for Android
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface TestNotificationPayload {
-  subscriber_id: string;
-  title: string;
-  body: string;
-  icon_url?: string;
-  image_url?: string;
-  click_url?: string;
-}
-
 // FCM token cache
 let fcmAccessToken: string | null = null;
-let fcmTokenExpiry: number = 0;
+let fcmTokenExpiry = 0;
 
 Deno.serve(async (req) => {
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const url = new URL(req.url);
+
+  // Health check endpoint
+  if (req.method === 'GET') {
+    return new Response(
+      JSON.stringify({ 
+        status: 'healthy', 
+        function: 'send-test-notification',
+        timestamp: new Date().toISOString(),
+        version: '2.0.0'
+      }),
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (req.method !== 'POST') {
+    return new Response(
+      JSON.stringify({ error: 'Method not allowed' }),
+      { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
   try {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+    
+    if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
+      console.error('[SendTestNotification] Missing environment variables');
+      return new Response(
+        JSON.stringify({ error: 'Server configuration error' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate authorization
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) {
       return new Response(
-        JSON.stringify({ error: 'Missing authorization header' }),
+        JSON.stringify({ error: 'Authorization required' }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Verify the user's JWT
-    const supabaseAnon = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY')!);
-    const { data: { user }, error: authError } = await supabaseAnon.auth.getUser(authHeader.replace('Bearer ', ''));
+    // Verify user JWT
+    const supabaseAnon = createClient(supabaseUrl, supabaseAnonKey);
+    const { data: { user }, error: authError } = await supabaseAnon.auth.getUser(
+      authHeader.replace('Bearer ', '')
+    );
     
     if (authError || !user) {
+      console.error('[SendTestNotification] Auth error:', authError);
       return new Response(
         JSON.stringify({ error: 'Invalid authorization' }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const payload: TestNotificationPayload = await req.json();
-    const { subscriber_id, title, body, icon_url, image_url, click_url } = payload;
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    if (!subscriber_id || !title || !body) {
+    let body;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON body' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { subscriber_id, title, body: notifBody, icon_url, image_url, click_url } = body;
+
+    if (!subscriber_id || !title || !notifBody) {
       return new Response(
         JSON.stringify({ error: 'Missing required fields: subscriber_id, title, body' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Get subscriber details with website VAPID keys
+    // Get subscriber with website VAPID keys
     const { data: subscriber, error: subError } = await supabase
       .from('subscribers')
       .select('*, websites!inner(user_id, vapid_public_key, vapid_private_key, url)')
@@ -76,47 +113,45 @@ Deno.serve(async (req) => {
       .single();
 
     if (subError || !subscriber) {
-      console.error('Subscriber fetch error:', subError);
+      console.error('[SendTestNotification] Subscriber not found:', subError);
       return new Response(
         JSON.stringify({ error: 'Subscriber not found' }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Verify user owns this website or is owner
+    // Verify user owns this website
     if (subscriber.websites.user_id !== user.id) {
       const { data: isOwner } = await supabase.rpc('is_owner', { _user_id: user.id });
       if (!isOwner) {
         return new Response(
-          JSON.stringify({ error: 'Unauthorized' }),
+          JSON.stringify({ error: 'Unauthorized - not your website' }),
           { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
     }
 
-    console.log(`[SendTestNotification] Sending to subscriber ${subscriber_id}, platform: ${subscriber.platform}`);
+    console.log(`[SendTestNotification] Sending to ${subscriber_id}, platform: ${subscriber.platform}`);
 
     let result = { success: false, message: '', platform: subscriber.platform || 'web', statusCode: 0 };
 
     // Send based on platform
     if (subscriber.fcm_token && subscriber.platform === 'android') {
-      // Send via FCM for Android
       result = await sendFCMNotification(subscriber.fcm_token, {
         title,
-        body,
+        body: notifBody,
         icon: icon_url,
         image: image_url,
         url: click_url,
       });
     } else if (subscriber.endpoint && subscriber.p256dh_key && subscriber.auth_key) {
-      // Send via Web Push with proper VAPID signing
       result = await sendWebPushNotification(
         subscriber.endpoint,
         subscriber.p256dh_key,
         subscriber.auth_key,
         {
           title,
-          body,
+          body: notifBody,
           icon: icon_url || '/icon-192x192.png',
           image: image_url,
           url: click_url || '/',
@@ -127,10 +162,10 @@ Deno.serve(async (req) => {
         subscriber.websites.url
       );
     } else {
-      result.message = 'No valid push credentials found for subscriber';
+      result.message = 'No valid push credentials found';
     }
 
-    // Log the test notification
+    // Log the notification
     await supabase.from('notification_logs').insert({
       website_id: subscriber.website_id,
       subscriber_id: subscriber.id,
@@ -140,47 +175,37 @@ Deno.serve(async (req) => {
       error_message: result.success ? null : result.message,
     });
 
-    console.log(`[SendTestNotification] Result:`, result);
+    console.log('[SendTestNotification] Result:', result);
 
     return new Response(
       JSON.stringify(result),
-      // Always return 200 so the client can display detailed failure reasons.
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
-  } catch (error: unknown) {
-    console.error('Error sending test notification:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+  } catch (error) {
+    console.error('[SendTestNotification] Unhandled error:', error);
     return new Response(
-      JSON.stringify({ error: errorMessage }),
+      JSON.stringify({ error: 'Internal server error', details: String(error) }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
 });
 
-/**
- * Send Web Push notification with proper VAPID JWT signing (RFC 8292)
- */
+// ============ Web Push Functions ============
+
 async function sendWebPushNotification(
   endpoint: string,
   p256dhKey: string,
   authKey: string,
-  notification: {
-    title: string;
-    body: string;
-    icon?: string;
-    image?: string;
-    url?: string;
-    notificationId?: string;
-  },
+  notification: any,
   vapidPublicKey: string,
   vapidPrivateKey: string,
   websiteUrl: string
 ): Promise<{ success: boolean; message: string; platform: string; statusCode: number }> {
   try {
-    console.log('[WebPush] Preparing notification to:', endpoint.substring(0, 50) + '...');
+    console.log('[WebPush] Sending to:', endpoint.substring(0, 60) + '...');
 
-    const payloadJson = JSON.stringify({
+    const payload = JSON.stringify({
       title: notification.title,
       body: notification.body,
       icon: notification.icon,
@@ -193,11 +218,7 @@ async function sendWebPushNotification(
     const audience = new URL(endpoint).origin;
     const vapidJwt = await createVapidJwt(audience, vapidPrivateKey, websiteUrl);
 
-    const { body } = await encryptWebPushAes128Gcm(
-      new TextEncoder().encode(payloadJson),
-      p256dhKey,
-      authKey
-    );
+    const encryptedBody = await encryptPayload(payload, p256dhKey, authKey);
 
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -206,11 +227,9 @@ async function sendWebPushNotification(
         'Content-Encoding': 'aes128gcm',
         'TTL': '86400',
         'Urgency': 'high',
-        // VAPID (RFC 8292)
-        'Crypto-Key': `p256ecdsa=${vapidPublicKey}`,
-        'Authorization': `Bearer ${vapidJwt}`,
+        'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
       },
-      body: body as unknown as BodyInit,
+      body: encryptedBody,
     });
 
     const statusCode = response.status;
@@ -226,7 +245,7 @@ async function sendWebPushNotification(
     }
 
     const errorText = await response.text();
-    console.error('[WebPush] Error response:', errorText);
+    console.error('[WebPush] Error:', statusCode, errorText);
 
     if (statusCode === 404 || statusCode === 410) {
       return {
@@ -262,33 +281,25 @@ async function sendWebPushNotification(
   }
 }
 
-/**
- * Create VAPID JWT token for Web Push authorization (RFC 8292)
- */
 async function createVapidJwt(
-  audience: string, 
+  audience: string,
   privateKeyBase64: string,
   subject: string
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   
-  const header = {
-    typ: 'JWT',
-    alg: 'ES256',
-  };
-
-  let sub = 'mailto:noreply@example.com';
+  const header = { typ: 'JWT', alg: 'ES256' };
+  
+  let sub = 'mailto:noreply@sigme.app';
   try {
     sub = subject.startsWith('mailto:')
       ? subject
       : `mailto:noreply@${new URL(subject).hostname}`;
-  } catch {
-    // keep fallback
-  }
+  } catch {}
 
   const payload = {
     aud: audience,
-    exp: now + 43200, // 12 hours
+    exp: now + 43200,
     sub,
   };
 
@@ -296,34 +307,26 @@ async function createVapidJwt(
   const payloadB64 = base64UrlEncode(JSON.stringify(payload));
   const signingInput = `${headerB64}.${payloadB64}`;
 
-  // Import the private key
   const privateKey = await importVapidPrivateKey(privateKeyBase64);
 
-  // Sign the JWT
   const signature = await crypto.subtle.sign(
     { name: 'ECDSA', hash: 'SHA-256' },
     privateKey,
     new TextEncoder().encode(signingInput)
   );
 
-  // Convert signature to base64url
-  const signatureB64 = base64UrlEncode(new Uint8Array(signature));
+  const rawSig = derToRaw(new Uint8Array(signature));
+  const signatureB64 = base64UrlEncode(rawSig);
 
   return `${signingInput}.${signatureB64}`;
 }
 
-/**
- * Import VAPID private key from base64url format
- */
 async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKey> {
   const privateKeyBytes = base64UrlDecode(privateKeyBase64);
   
-  // Check if this is PKCS8 format (longer) or raw 32-byte key
   if (privateKeyBytes.length > 32) {
-    // PKCS8 format from our key generator
     const keyBuffer = new ArrayBuffer(privateKeyBytes.length);
-    const keyView = new Uint8Array(keyBuffer);
-    keyView.set(privateKeyBytes);
+    new Uint8Array(keyBuffer).set(privateKeyBytes);
     
     return await crypto.subtle.importKey(
       'pkcs8',
@@ -334,7 +337,6 @@ async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKe
     );
   }
   
-  // For raw 32-byte keys, construct a PKCS8 wrapper
   const pkcs8Header = new Uint8Array([
     0x30, 0x41, 0x02, 0x01, 0x00, 0x30, 0x13,
     0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
@@ -347,8 +349,7 @@ async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKe
   pkcs8Key.set(privateKeyBytes.slice(0, 32), pkcs8Header.length);
 
   const keyBuffer = new ArrayBuffer(pkcs8Key.length);
-  const keyView = new Uint8Array(keyBuffer);
-  keyView.set(pkcs8Key);
+  new Uint8Array(keyBuffer).set(pkcs8Key);
   
   return await crypto.subtle.importKey(
     'pkcs8',
@@ -359,18 +360,149 @@ async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKe
   );
 }
 
-/**
- * Send FCM notification for Android
- */
+function derToRaw(der: Uint8Array): Uint8Array {
+  let offset = 2;
+  if (der[offset] !== 0x02) throw new Error('Invalid DER');
+  offset++;
+  const rLen = der[offset++];
+  let r = der.slice(offset, offset + rLen);
+  offset += rLen;
+  
+  if (der[offset] !== 0x02) throw new Error('Invalid DER');
+  offset++;
+  const sLen = der[offset++];
+  let s = der.slice(offset, offset + sLen);
+  
+  while (r.length > 32 && r[0] === 0) r = r.slice(1);
+  while (s.length > 32 && s[0] === 0) s = s.slice(1);
+  
+  const raw = new Uint8Array(64);
+  raw.set(r, 32 - r.length);
+  raw.set(s, 64 - s.length);
+  
+  return raw;
+}
+
+async function encryptPayload(
+  payload: string,
+  p256dhKey: string,
+  authKey: string
+): Promise<Uint8Array> {
+  const payloadBytes = new TextEncoder().encode(payload);
+  const userPublicKeyBytes = base64UrlDecode(p256dhKey);
+  const authSecretBytes = base64UrlDecode(authKey);
+
+  const ephemeralKeyPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  );
+
+  const userPublicKey = await crypto.subtle.importKey(
+    'raw',
+    userPublicKeyBytes,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    []
+  );
+
+  const sharedSecret = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: userPublicKey },
+    ephemeralKeyPair.privateKey,
+    256
+  );
+
+  const ephemeralPublicKey = await crypto.subtle.exportKey('raw', ephemeralKeyPair.publicKey);
+  const ephemeralPublicKeyBytes = new Uint8Array(ephemeralPublicKey);
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  
+  const keyInfo = createInfo('aesgcm', userPublicKeyBytes, ephemeralPublicKeyBytes);
+  const nonceInfo = createInfo('nonce', userPublicKeyBytes, ephemeralPublicKeyBytes);
+  
+  const authInfo = new TextEncoder().encode('Content-Encoding: auth\0');
+  const prk = await hkdfExtract(authSecretBytes, new Uint8Array(sharedSecret));
+  const ikm = await hkdfExpand(prk, authInfo, 32);
+  
+  const keyPrk = await hkdfExtract(salt, ikm);
+  const cek = await hkdfExpand(keyPrk, keyInfo, 16);
+  const nonce = await hkdfExpand(keyPrk, nonceInfo, 12);
+
+  const aesKey = await crypto.subtle.importKey(
+    'raw',
+    cek,
+    { name: 'AES-GCM' },
+    false,
+    ['encrypt']
+  );
+
+  const paddedPayload = new Uint8Array(2 + payloadBytes.length);
+  paddedPayload[0] = 0;
+  paddedPayload[1] = 0;
+  paddedPayload.set(payloadBytes, 2);
+
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce },
+    aesKey,
+    paddedPayload
+  );
+
+  const recordSize = 4096;
+  const header = new Uint8Array(16 + 4 + 1 + 65);
+  header.set(salt, 0);
+  header[16] = (recordSize >> 24) & 0xff;
+  header[17] = (recordSize >> 16) & 0xff;
+  header[18] = (recordSize >> 8) & 0xff;
+  header[19] = recordSize & 0xff;
+  header[20] = 65;
+  header.set(ephemeralPublicKeyBytes, 21);
+
+  const result = new Uint8Array(header.length + ciphertext.byteLength);
+  result.set(header);
+  result.set(new Uint8Array(ciphertext), header.length);
+
+  return result;
+}
+
+function createInfo(type: string, userPublicKey: Uint8Array, ephemeralKey: Uint8Array): Uint8Array {
+  const typeBytes = new TextEncoder().encode(`Content-Encoding: ${type}\0`);
+  const p256Bytes = new TextEncoder().encode('P-256\0');
+  
+  const info = new Uint8Array(
+    typeBytes.length + p256Bytes.length + 2 + userPublicKey.length + 2 + ephemeralKey.length
+  );
+  
+  let offset = 0;
+  info.set(typeBytes, offset); offset += typeBytes.length;
+  info.set(p256Bytes, offset); offset += p256Bytes.length;
+  info[offset++] = 0; info[offset++] = 65;
+  info.set(userPublicKey, offset); offset += userPublicKey.length;
+  info[offset++] = 0; info[offset++] = 65;
+  info.set(ephemeralKey, offset);
+  
+  return info;
+}
+
+async function hkdfExtract(salt: Uint8Array, ikm: Uint8Array): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey('raw', salt, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const prk = await crypto.subtle.sign('HMAC', key, ikm);
+  return new Uint8Array(prk);
+}
+
+async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey('raw', prk, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const input = new Uint8Array(info.length + 1);
+  input.set(info);
+  input[info.length] = 1;
+  const okm = await crypto.subtle.sign('HMAC', key, input);
+  return new Uint8Array(okm).slice(0, length);
+}
+
+// ============ FCM Functions ============
+
 async function sendFCMNotification(
   fcmToken: string,
-  notification: {
-    title: string;
-    body: string;
-    icon?: string;
-    image?: string;
-    url?: string;
-  }
+  notification: any
 ): Promise<{ success: boolean; message: string; platform: string; statusCode: number }> {
   try {
     const accessToken = await getFCMAccessToken();
@@ -406,13 +538,11 @@ async function sendFCMNotification(
             android: {
               priority: 'high',
               notification: {
-                icon: notification.icon || 'ic_notification',
                 click_action: notification.url || 'OPEN_APP',
               },
             },
             data: { 
-              url: notification.url || '', 
-              test: 'true' 
+              url: notification.url || '',
             },
           },
         }),
@@ -431,7 +561,7 @@ async function sendFCMNotification(
     }
 
     const error = await response.text();
-    console.error('[FCM] Error:', error);
+    console.error('[FCM] Error:', statusCode, error);
     
     return { 
       success: false, 
@@ -452,259 +582,92 @@ async function sendFCMNotification(
 }
 
 async function getFCMAccessToken(): Promise<string | null> {
-  const now = Date.now();
-  if (fcmAccessToken && fcmTokenExpiry > now) {
+  if (fcmAccessToken && fcmTokenExpiry > Date.now()) {
     return fcmAccessToken;
   }
 
   const serviceAccountJson = Deno.env.get('FCM_SERVICE_ACCOUNT_JSON');
   if (!serviceAccountJson) {
-    console.log('FCM_SERVICE_ACCOUNT_JSON not configured');
     return null;
   }
 
   try {
     const serviceAccount = JSON.parse(serviceAccountJson);
-    const nowSec = Math.floor(Date.now() / 1000);
-    const expiry = nowSec + 3600;
+    const now = Math.floor(Date.now() / 1000);
 
     const header = { alg: 'RS256', typ: 'JWT' };
     const payload = {
       iss: serviceAccount.client_email,
       scope: 'https://www.googleapis.com/auth/firebase.messaging',
       aud: 'https://oauth2.googleapis.com/token',
-      iat: nowSec,
-      exp: expiry,
+      iat: now,
+      exp: now + 3600,
     };
 
-    const jwt = await createFCMJwt(header, payload, serviceAccount.private_key);
+    const jwt = await createRSAJwt(header, payload, serviceAccount.private_key);
 
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    const response = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
     });
 
-    if (!tokenResponse.ok) {
-      console.error('Failed to get FCM access token:', await tokenResponse.text());
+    if (!response.ok) {
+      console.error('[FCM] Token error:', await response.text());
       return null;
     }
 
-    const tokenData = await tokenResponse.json();
-    fcmAccessToken = tokenData.access_token;
-    fcmTokenExpiry = Date.now() + (tokenData.expires_in - 60) * 1000;
+    const data = await response.json();
+    fcmAccessToken = data.access_token;
+    fcmTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
 
     return fcmAccessToken;
   } catch (error) {
-    console.error('Error getting FCM access token:', error);
+    console.error('[FCM] Token exception:', error);
     return null;
   }
 }
 
-async function createFCMJwt(header: object, payload: object, privateKeyPem: string): Promise<string> {
+async function createRSAJwt(header: any, payload: any, privateKeyPem: string): Promise<string> {
   const headerB64 = base64UrlEncode(JSON.stringify(header));
   const payloadB64 = base64UrlEncode(JSON.stringify(payload));
   const signingInput = `${headerB64}.${payloadB64}`;
 
-  const privateKey = await importRSAPrivateKey(privateKeyPem);
-  const signature = await crypto.subtle.sign(
-    { name: 'RSASSA-PKCS1-v1_5' },
-    privateKey,
-    new TextEncoder().encode(signingInput)
-  );
-
-  const signatureB64 = base64UrlEncode(new Uint8Array(signature));
-  return `${signingInput}.${signatureB64}`;
-}
-
-async function importRSAPrivateKey(pem: string): Promise<CryptoKey> {
-  const pemContents = pem
+  const pemBody = privateKeyPem
     .replace(/-----BEGIN PRIVATE KEY-----/, '')
     .replace(/-----END PRIVATE KEY-----/, '')
     .replace(/\s/g, '');
   
-  const binaryDer = Uint8Array.from(atob(pemContents), c => c.charCodeAt(0));
+  const keyBytes = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
   
-  return await crypto.subtle.importKey(
+  const privateKey = await crypto.subtle.importKey(
     'pkcs8',
-    binaryDer.buffer,
+    keyBytes,
     { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
     false,
     ['sign']
   );
-}
 
-type Bytes = Uint8Array<ArrayBuffer>;
-
-async function encryptWebPushAes128Gcm(
-  plaintext: Uint8Array,
-  userPublicKeyB64Url: string,
-  userAuthB64Url: string
-): Promise<{ body: Bytes; saltB64Url: string; dhB64Url: string }> {
-  // RFC 8291 - aes128gcm
-  const salt = crypto.getRandomValues(new Uint8Array(16)) as Bytes;
-
-  const userPublicKeyBytes = base64UrlDecode(userPublicKeyB64Url);
-  const userAuthSecret = base64UrlDecode(userAuthB64Url);
-
-  // Ephemeral ECDH key pair
-  const serverKeyPair = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    ['deriveBits']
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    privateKey,
+    new TextEncoder().encode(signingInput)
   );
 
-  const serverPublicKeyRaw = new Uint8Array(
-    await crypto.subtle.exportKey('raw', serverKeyPair.publicKey)
-  ) as Bytes;
-
-  const userPublicKey = await crypto.subtle.importKey(
-    'raw',
-    userPublicKeyBytes,
-    { name: 'ECDH', namedCurve: 'P-256' },
-    true,
-    []
-  );
-
-  const sharedSecret = new Uint8Array(
-    await crypto.subtle.deriveBits(
-      { name: 'ECDH', public: userPublicKey },
-      serverKeyPair.privateKey,
-      256
-    )
-  ) as Bytes;
-
-  // Derive IKM = HKDF-Expand(HKDF-Extract(auth, sharedSecret), "Content-Encoding: auth\0", 32)
-  const prk = await hkdfExtract(userAuthSecret, sharedSecret);
-  const ikm = await hkdfExpand(prk, new TextEncoder().encode('Content-Encoding: auth\0'), 32);
-
-  // PRK' = HKDF-Extract(salt, IKM)
-  const prk2 = await hkdfExtract(salt, ikm);
-
-  const context = createWebPushContext(userPublicKeyBytes, serverPublicKeyRaw);
-
-  const cekInfo = concatBytes(new TextEncoder().encode('Content-Encoding: aes128gcm\0'), context);
-  const nonceInfo = concatBytes(new TextEncoder().encode('Content-Encoding: nonce\0'), context);
-
-  const cek = await hkdfExpand(prk2, cekInfo, 16);
-  const nonce = await hkdfExpand(prk2, nonceInfo, 12);
-
-  // Append padding delimiter (0x02) per RFC 8291 (no padding)
-  const paddedPlaintext = concatBytes(plaintext, new Uint8Array([0x02]));
-
-  const aesKey = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['encrypt']);
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, paddedPlaintext)
-  ) as Bytes;
-
-  // Build binary header (salt + rs(4096) + idlen + dh)
-  const rs = 4096;
-  const rsBytes = new Uint8Array([
-    (rs >>> 24) & 0xff,
-    (rs >>> 16) & 0xff,
-    (rs >>> 8) & 0xff,
-    rs & 0xff,
-  ]) as Bytes;
-
-  const idLen = new Uint8Array([serverPublicKeyRaw.length]) as Bytes;
-  const header = concatBytes(concatBytes(concatBytes(salt, rsBytes), idLen), serverPublicKeyRaw);
-
-  return {
-    body: concatBytes(header, ciphertext),
-    saltB64Url: base64UrlEncode(salt),
-    dhB64Url: base64UrlEncode(serverPublicKeyRaw),
-  };
+  return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
 }
 
-function createWebPushContext(clientPublicKeyRaw: Bytes, serverPublicKeyRaw: Bytes): Bytes {
-  // "P-256\0" + uint16be(len(client)) + client + uint16be(len(server)) + server
-  const label = new TextEncoder().encode('P-256\0');
-  const clientLen = uint16be(clientPublicKeyRaw.length);
-  const serverLen = uint16be(serverPublicKeyRaw.length);
-  return concatBytes(
-    concatBytes(
-      concatBytes(concatBytes(label, clientLen), clientPublicKeyRaw),
-      serverLen
-    ),
-    serverPublicKeyRaw
-  );
+// ============ Utility Functions ============
+
+function base64UrlEncode(input: string | Uint8Array): string {
+  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+  const base64 = btoa(String.fromCharCode(...bytes));
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function uint16be(value: number): Bytes {
-  const buf = new ArrayBuffer(2);
-  const out = new Uint8Array(buf) as Bytes;
-  out[0] = (value >>> 8) & 0xff;
-  out[1] = value & 0xff;
-  return out;
-}
-
-function concatBytes(a: Uint8Array, b: Uint8Array): Bytes {
-  const buf = new ArrayBuffer(a.length + b.length);
-  const out = new Uint8Array(buf) as Bytes;
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-
-async function hkdfExtract(salt: Bytes, ikm: Bytes): Promise<Bytes> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    salt,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-  const prk = await crypto.subtle.sign('HMAC', key, ikm);
-  return new Uint8Array(prk) as Bytes;
-}
-
-async function hkdfExpand(prk: Bytes, info: Uint8Array, length: number): Promise<Bytes> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    prk,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const hashLen = 32;
-  const n = Math.ceil(length / hashLen);
-
-  let t = new Uint8Array(new ArrayBuffer(0)) as Bytes;
-  let okm = new Uint8Array(new ArrayBuffer(0)) as Bytes;
-
-  for (let i = 1; i <= n; i++) {
-    const input = concatBytes(concatBytes(t, info), new Uint8Array([i]));
-    t = new Uint8Array(await crypto.subtle.sign('HMAC', key, input)) as Bytes;
-    okm = concatBytes(okm, t);
-  }
-
-  return okm.slice(0, length) as Bytes;
-}
-
-function base64UrlEncode(data: string | Uint8Array): string {
-  let str: string;
-  if (typeof data === 'string') {
-    str = btoa(data);
-  } else {
-    let binary = '';
-    for (let i = 0; i < data.length; i++) {
-      binary += String.fromCharCode(data[i]);
-    }
-    str = btoa(binary);
-  }
-  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function base64UrlDecode(str: string): Bytes {
-  const padding = '='.repeat((4 - (str.length % 4)) % 4);
-  const base64 = (str + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const rawData = atob(base64);
-
-  const buf = new ArrayBuffer(rawData.length);
-  const out = new Uint8Array(buf) as Bytes;
-  for (let i = 0; i < rawData.length; ++i) {
-    out[i] = rawData.charCodeAt(i);
-  }
-  return out;
+function base64UrlDecode(input: string): Uint8Array {
+  let base64 = input.replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4) base64 += '=';
+  const binary = atob(base64);
+  return Uint8Array.from(binary, c => c.charCodeAt(0));
 }
