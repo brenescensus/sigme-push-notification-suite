@@ -415,8 +415,8 @@ async function createVapidJwt(
     new TextEncoder().encode(signingInput)
   );
 
-  // Convert DER signature to raw format (64 bytes: r || s)
-  const rawSig = derToRaw(new Uint8Array(signature));
+  // Convert signature to raw format (handles both DER and raw from different runtimes)
+  const rawSig = signatureToRaw(new Uint8Array(signature));
   const signatureB64 = base64UrlEncode(rawSig);
 
   return `${signingInput}.${signatureB64}`;
@@ -463,30 +463,87 @@ async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKe
   );
 }
 
+// Convert ECDSA signature to raw format (handles both DER and raw)
+function signatureToRaw(sig: Uint8Array): Uint8Array {
+  // If already 64 bytes, assume it's raw format
+  if (sig.length === 64) {
+    return sig;
+  }
+  
+  // Check if it's DER format (starts with 0x30)
+  if (sig.length > 64 && sig[0] === 0x30) {
+    return derToRaw(sig);
+  }
+  
+  // For other lengths, try DER parsing
+  if (sig.length > 64) {
+    try {
+      return derToRaw(sig);
+    } catch {
+      // Fall through to padding
+    }
+  }
+  
+  // Pad or truncate to 64 bytes
+  const raw = new Uint8Array(64);
+  if (sig.length >= 64) {
+    raw.set(sig.slice(0, 64));
+  } else {
+    raw.set(sig, 64 - sig.length);
+  }
+  return raw;
+}
+
 // Convert DER-encoded ECDSA signature to raw format
 function derToRaw(der: Uint8Array): Uint8Array {
   // DER format: 0x30 <len> 0x02 <rLen> <r> 0x02 <sLen> <s>
-  // Raw format: <r padded to 32 bytes><s padded to 32 bytes>
+  let offset = 0;
   
-  let offset = 2; // Skip 0x30 and length
+  if (der[offset] !== 0x30) throw new Error('Invalid DER: expected SEQUENCE');
+  offset++;
+  
+  // Handle length byte(s)
+  let seqLen = der[offset++];
+  if (seqLen & 0x80) {
+    const numBytes = seqLen & 0x7f;
+    seqLen = 0;
+    for (let i = 0; i < numBytes; i++) {
+      seqLen = (seqLen << 8) | der[offset++];
+    }
+  }
   
   // Parse R
-  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected 0x02 for R');
+  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected INTEGER for R');
   offset++;
-  const rLen = der[offset++];
+  let rLen = der[offset++];
+  if (rLen & 0x80) {
+    const numBytes = rLen & 0x7f;
+    rLen = 0;
+    for (let i = 0; i < numBytes; i++) {
+      rLen = (rLen << 8) | der[offset++];
+    }
+  }
   let r = der.slice(offset, offset + rLen);
   offset += rLen;
   
   // Parse S
-  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected 0x02 for S');
+  if (der[offset] !== 0x02) throw new Error('Invalid DER: expected INTEGER for S');
   offset++;
-  const sLen = der[offset++];
+  let sLen = der[offset++];
+  if (sLen & 0x80) {
+    const numBytes = sLen & 0x7f;
+    sLen = 0;
+    for (let i = 0; i < numBytes; i++) {
+      sLen = (sLen << 8) | der[offset++];
+    }
+  }
   let s = der.slice(offset, offset + sLen);
   
-  // Remove leading zeros and pad to 32 bytes
+  // Remove leading zeros (DER uses signed integers)
   while (r.length > 32 && r[0] === 0) r = r.slice(1);
   while (s.length > 32 && s[0] === 0) s = s.slice(1);
   
+  // Pad to 32 bytes each
   const raw = new Uint8Array(64);
   raw.set(r, 32 - r.length);
   raw.set(s, 64 - s.length);
