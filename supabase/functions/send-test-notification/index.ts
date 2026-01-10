@@ -220,6 +220,10 @@ async function sendWebPushNotification(
 
     const encryptedBody = await encryptPayload(payload, p256dhKey, authKey);
 
+    // Convert Uint8Array to ArrayBuffer for fetch body
+    const bodyBuffer = new ArrayBuffer(encryptedBody.length);
+    new Uint8Array(bodyBuffer).set(encryptedBody);
+    
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -229,7 +233,7 @@ async function sendWebPushNotification(
         'Urgency': 'high',
         'Authorization': `vapid t=${vapidJwt}, k=${vapidPublicKey}`,
       },
-      body: encryptedBody,
+      body: bodyBuffer,
     });
 
     const statusCode = response.status;
@@ -398,9 +402,12 @@ async function encryptPayload(
     ['deriveBits']
   );
 
+  // Convert Uint8Array to ArrayBuffer for crypto operations
+  const userKeyBuffer = toArrayBuffer(userPublicKeyBytes);
+  
   const userPublicKey = await crypto.subtle.importKey(
     'raw',
-    userPublicKeyBytes,
+    userKeyBuffer,
     { name: 'ECDH', namedCurve: 'P-256' },
     false,
     []
@@ -430,7 +437,7 @@ async function encryptPayload(
 
   const aesKey = await crypto.subtle.importKey(
     'raw',
-    cek,
+    toArrayBuffer(cek),
     { name: 'AES-GCM' },
     false,
     ['encrypt']
@@ -442,7 +449,7 @@ async function encryptPayload(
   paddedPayload.set(payloadBytes, 2);
 
   const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce },
+    { name: 'AES-GCM', iv: toArrayBuffer(nonce) },
     aesKey,
     paddedPayload
   );
@@ -483,18 +490,25 @@ function createInfo(type: string, userPublicKey: Uint8Array, ephemeralKey: Uint8
   return info;
 }
 
+// Helper to convert Uint8Array to ArrayBuffer (avoids SharedArrayBuffer type issues)
+function toArrayBuffer(arr: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(arr.length);
+  new Uint8Array(buffer).set(arr);
+  return buffer;
+}
+
 async function hkdfExtract(salt: Uint8Array, ikm: Uint8Array): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey('raw', salt, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const prk = await crypto.subtle.sign('HMAC', key, ikm);
+  const key = await crypto.subtle.importKey('raw', toArrayBuffer(salt), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const prk = await crypto.subtle.sign('HMAC', key, toArrayBuffer(ikm));
   return new Uint8Array(prk);
 }
 
 async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey('raw', prk, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const key = await crypto.subtle.importKey('raw', toArrayBuffer(prk), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const input = new Uint8Array(info.length + 1);
   input.set(info);
   input[info.length] = 1;
-  const okm = await crypto.subtle.sign('HMAC', key, input);
+  const okm = await crypto.subtle.sign('HMAC', key, toArrayBuffer(input));
   return new Uint8Array(okm).slice(0, length);
 }
 
@@ -642,7 +656,7 @@ async function createRSAJwt(header: any, payload: any, privateKeyPem: string): P
   
   const privateKey = await crypto.subtle.importKey(
     'pkcs8',
-    keyBytes,
+    toArrayBuffer(keyBytes),
     { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
     false,
     ['sign']
