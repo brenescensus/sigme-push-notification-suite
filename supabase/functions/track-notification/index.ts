@@ -33,41 +33,95 @@ serve(async (req) => {
     const pathParts = url.pathname.split('/');
     const eventType = pathParts[pathParts.length - 1]; // delivered, clicked, dismissed
 
-    const body = await req.json();
+    let body;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON body' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
     const { websiteId, notificationId, campaignId, subscriberId, action } = body;
 
-    console.log(`[TrackNotification] Event: ${eventType} for notification:`, notificationId);
+    console.log(`[TrackNotification] Event: ${eventType}`);
 
-    // Validate required fields
-    if (!websiteId || !notificationId) {
+    // Input validation - websiteId (required, string, max 100 chars)
+    if (!websiteId || typeof websiteId !== 'string' || websiteId.length > 100) {
       return new Response(
-        JSON.stringify({ error: 'websiteId and notificationId are required' }),
+        JSON.stringify({ error: 'Invalid websiteId' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
+    // Input validation - notificationId (required, string, max 100 chars)
+    if (!notificationId || typeof notificationId !== 'string' || notificationId.length > 100) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid notificationId' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate UUID format for campaignId if provided
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (campaignId && (typeof campaignId !== 'string' || !uuidRegex.test(campaignId))) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid campaignId format' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate UUID format for subscriberId if provided
+    if (subscriberId && (typeof subscriberId !== 'string' || !uuidRegex.test(subscriberId))) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid subscriberId format' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate action if provided
+    if (action && (typeof action !== 'string' || action.length > 100)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid action' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate eventType
+    if (!['delivered', 'clicked', 'dismissed'].includes(eventType)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid event type' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Verify notification exists before tracking
+    const { data: existingNotification } = await supabase
+      .from('notification_logs')
+      .select('id')
+      .eq('id', notificationId)
+      .maybeSingle();
+
+    // If notificationId is a UUID and not found, we should still proceed (it might be a test notification)
+    // But log a warning
+    if (!existingNotification && uuidRegex.test(notificationId)) {
+      console.log(`[TrackNotification] Notification log not found for ID: ${notificationId}, proceeding anyway`);
+    }
+
     const now = new Date().toISOString();
-    let status: string;
-    let updateFields: any = {};
+    let updateFields: Record<string, string> = {};
 
     switch (eventType) {
       case 'delivered':
-        status = 'delivered';
         updateFields = { status: 'delivered', delivered_at: now };
         break;
       case 'clicked':
-        status = 'clicked';
         updateFields = { status: 'clicked', clicked_at: now };
         break;
       case 'dismissed':
-        status = 'dismissed';
         updateFields = { status: 'dismissed' };
         break;
-      default:
-        return new Response(
-          JSON.stringify({ error: 'Invalid event type' }),
-          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
     }
 
     // Update notification log

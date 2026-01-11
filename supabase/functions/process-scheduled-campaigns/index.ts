@@ -23,6 +23,32 @@ serve(async (req) => {
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+    // This function should only be called by pg_cron or with the service role key
+    // Validate that the request has proper authorization
+    const authHeader = req.headers.get('authorization');
+    
+    // Check if called with service role key (from pg_cron or internal calls)
+    if (authHeader) {
+      const token = authHeader.replace('Bearer ', '');
+      // Only allow service role key (used by pg_cron and internal edge function calls)
+      if (token !== supabaseServiceKey) {
+        console.error('[ProcessScheduled] Unauthorized - invalid token');
+        return new Response(
+          JSON.stringify({ error: 'Unauthorized' }),
+          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    } else {
+      // No auth header - reject request
+      console.error('[ProcessScheduled] Unauthorized - no auth header');
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log('[ProcessScheduled] Authorized request received');
+
     console.log('[ProcessScheduled] Starting scheduled campaign check...');
 
     const now = new Date().toISOString();

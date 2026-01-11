@@ -98,9 +98,47 @@ Deno.serve(async (req) => {
 
     const { subscriber_id, title, body: notifBody, icon_url, image_url, click_url } = body;
 
-    if (!subscriber_id || !title || !notifBody) {
+    // Input validation - subscriber_id (required, UUID format)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!subscriber_id || typeof subscriber_id !== 'string' || !uuidRegex.test(subscriber_id)) {
       return new Response(
-        JSON.stringify({ error: 'Missing required fields: subscriber_id, title, body' }),
+        JSON.stringify({ error: 'Invalid subscriber_id format' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Input validation - title (required, string, max 200 chars)
+    if (!title || typeof title !== 'string' || title.length > 200) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid title (max 200 chars)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Input validation - body (required, string, max 1000 chars)
+    if (!notifBody || typeof notifBody !== 'string' || notifBody.length > 1000) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid body (max 1000 chars)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate optional URL fields
+    if (icon_url && (typeof icon_url !== 'string' || icon_url.length > 2000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid icon_url' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (image_url && (typeof image_url !== 'string' || image_url.length > 2000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid image_url' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (click_url && (typeof click_url !== 'string' || click_url.length > 2000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid click_url' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }

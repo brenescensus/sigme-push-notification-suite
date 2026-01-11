@@ -55,8 +55,9 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
     
-    if (!supabaseUrl || !supabaseServiceKey) {
+    if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
       console.error('[SendNotification] Missing environment variables');
       return new Response(
         JSON.stringify({ error: 'Server configuration error' }),
@@ -66,14 +67,29 @@ Deno.serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Validate authorization
+    // Validate authorization - require Bearer token
     const authHeader = req.headers.get('authorization');
-    if (!authHeader) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return new Response(
         JSON.stringify({ error: 'Authorization required' }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
+
+    // Verify the JWT token to authenticate the user
+    const token = authHeader.replace('Bearer ', '');
+    const supabaseAnon = createClient(supabaseUrl, supabaseAnonKey);
+    const { data: { user }, error: authError } = await supabaseAnon.auth.getUser(token);
+    
+    if (authError || !user) {
+      console.error('[SendNotification] Auth error:', authError);
+      return new Response(
+        JSON.stringify({ error: 'Invalid authorization token' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log('[SendNotification] Authenticated user:', user.id);
 
     let body;
     try {
@@ -87,16 +103,103 @@ Deno.serve(async (req) => {
 
     const { campaignId, websiteId, notification, targetSubscriberIds } = body;
 
-    console.log('[SendNotification] Request received:', { campaignId, websiteId, hasNotification: !!notification });
-
-    if (!websiteId || !notification) {
+    // Input validation - websiteId
+    if (!websiteId || typeof websiteId !== 'string' || websiteId.length > 100) {
       return new Response(
-        JSON.stringify({ error: 'websiteId and notification are required' }),
+        JSON.stringify({ error: 'Invalid websiteId' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Get website with VAPID keys
+    // Input validation - notification object
+    if (!notification || typeof notification !== 'object') {
+      return new Response(
+        JSON.stringify({ error: 'notification object is required' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate notification fields
+    const { title, body: notifBody, icon, image, url, actions } = notification;
+    
+    if (!title || typeof title !== 'string' || title.length > 200) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid notification title (max 200 chars)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (!notifBody || typeof notifBody !== 'string' || notifBody.length > 1000) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid notification body (max 1000 chars)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate optional URL fields
+    if (icon && (typeof icon !== 'string' || icon.length > 2000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid icon URL' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (image && (typeof image !== 'string' || image.length > 2000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid image URL' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    if (url && (typeof url !== 'string' || url.length > 2000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid click URL' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate actions array
+    if (actions && (!Array.isArray(actions) || actions.length > 2)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid actions (max 2 allowed)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Validate targetSubscriberIds if provided
+    if (targetSubscriberIds) {
+      if (!Array.isArray(targetSubscriberIds) || targetSubscriberIds.length > 1000) {
+        return new Response(
+          JSON.stringify({ error: 'Invalid targetSubscriberIds (max 1000)' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      // Validate each ID is a valid UUID format
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      for (const id of targetSubscriberIds) {
+        if (typeof id !== 'string' || !uuidRegex.test(id)) {
+          return new Response(
+            JSON.stringify({ error: 'Invalid subscriber ID format' }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+    }
+
+    // Validate campaignId if provided (should be UUID)
+    if (campaignId) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (typeof campaignId !== 'string' || !uuidRegex.test(campaignId)) {
+        return new Response(
+          JSON.stringify({ error: 'Invalid campaignId format' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    }
+
+    console.log('[SendNotification] Request received:', { campaignId, websiteId, hasNotification: !!notification });
+
+    // Get website with VAPID keys and verify ownership
     const { data: website, error: websiteError } = await supabase
       .from('websites')
       .select('*')
@@ -109,6 +212,19 @@ Deno.serve(async (req) => {
         JSON.stringify({ error: 'Website not found' }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
+    }
+
+    // Verify user owns this website
+    if (website.user_id !== user.id) {
+      // Check if user is an owner (admin role)
+      const { data: isOwner } = await supabase.rpc('is_owner', { _user_id: user.id });
+      if (!isOwner) {
+        console.error('[SendNotification] Unauthorized - user does not own website');
+        return new Response(
+          JSON.stringify({ error: 'Unauthorized - not your website' }),
+          { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
     }
 
     // Get target subscribers

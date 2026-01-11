@@ -33,8 +33,17 @@ serve(async (req) => {
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    const body = await req.json();
-    console.log('[RegisterSubscriber] Received request body:', JSON.stringify(body, null, 2));
+    let body;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON body' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    console.log('[RegisterSubscriber] Received request');
 
     const { 
       websiteId, 
@@ -52,16 +61,114 @@ serve(async (req) => {
       platform: providedPlatform
     } = body;
 
-    // Validate required fields
-    if (!websiteId) {
-      console.error('[RegisterSubscriber] Missing websiteId');
+    // Input validation - websiteId (required, string, max 100 chars)
+    if (!websiteId || typeof websiteId !== 'string' || websiteId.length > 100) {
+      console.error('[RegisterSubscriber] Invalid websiteId');
       return new Response(
-        JSON.stringify({ error: 'websiteId is required' }),
+        JSON.stringify({ error: 'Invalid websiteId' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Verify website exists
+    // Input validation - subscription object
+    if (subscription) {
+      if (typeof subscription !== 'object') {
+        return new Response(
+          JSON.stringify({ error: 'Invalid subscription format' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      if (subscription.endpoint && (typeof subscription.endpoint !== 'string' || subscription.endpoint.length > 2000)) {
+        return new Response(
+          JSON.stringify({ error: 'Invalid endpoint' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+      if (subscription.keys) {
+        if (typeof subscription.keys !== 'object') {
+          return new Response(
+            JSON.stringify({ error: 'Invalid subscription keys' }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        if (subscription.keys.p256dh && (typeof subscription.keys.p256dh !== 'string' || subscription.keys.p256dh.length > 500)) {
+          return new Response(
+            JSON.stringify({ error: 'Invalid p256dh key' }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+        if (subscription.keys.auth && (typeof subscription.keys.auth !== 'string' || subscription.keys.auth.length > 500)) {
+          return new Response(
+            JSON.stringify({ error: 'Invalid auth key' }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+    }
+
+    // Input validation - optional string fields (max lengths)
+    if (userAgent && (typeof userAgent !== 'string' || userAgent.length > 1000)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid userAgent' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (language && (typeof language !== 'string' || language.length > 50)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid language' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (timezone && (typeof timezone !== 'string' || timezone.length > 100)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid timezone' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (fcmToken && (typeof fcmToken !== 'string' || fcmToken.length > 500)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid fcmToken' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (apnsToken && (typeof apnsToken !== 'string' || apnsToken.length > 500)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid apnsToken' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (providedBrowser && (typeof providedBrowser !== 'string' || providedBrowser.length > 100)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid browser' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (providedBrowserVersion && (typeof providedBrowserVersion !== 'string' || providedBrowserVersion.length > 50)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid browserVersion' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (providedDeviceType && !['desktop', 'mobile', 'tablet'].includes(providedDeviceType)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid deviceType' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (providedOs && (typeof providedOs !== 'string' || providedOs.length > 100)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid os' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (providedPlatform && !['web', 'android', 'ios'].includes(providedPlatform)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid platform' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Verify website exists and is active
     const { data: website, error: websiteError } = await supabase
       .from('websites')
       .select('id, status')
@@ -69,10 +176,19 @@ serve(async (req) => {
       .maybeSingle();
 
     if (websiteError || !website) {
-      console.error('[RegisterSubscriber] Website not found:', websiteId, websiteError);
+      console.error('[RegisterSubscriber] Website not found:', websiteId);
       return new Response(
         JSON.stringify({ error: 'Invalid website' }),
         { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    
+    // Check website is active
+    if (website.status !== 'active') {
+      console.error('[RegisterSubscriber] Website not active:', websiteId);
+      return new Response(
+        JSON.stringify({ error: 'Website not active' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
