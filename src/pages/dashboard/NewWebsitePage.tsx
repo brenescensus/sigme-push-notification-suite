@@ -3,11 +3,15 @@
  * 
  * Step-by-step flow for adding a new website:
  * 1. Enter website details (name, URL, description)
- * 2. Generate VAPID keys via secure backend
+ * 2. Confirm using the global Firebase VAPID key
  * 3. Show integration code and service worker
  * 
- * REFACTORED: Uses self-configuring service worker with query params.
- * No manual console steps required.
+ * IMPORTANT: Uses a SINGLE authorized Firebase VAPID key pair for ALL websites.
+ * This ensures cryptographic consistency across the entire push notification system.
+ * 
+ * AUTHORIZED VAPID KEY (from Firebase Cloud Messaging):
+ * Public: BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I
+ * Private: Stored in FIREBASE_VAPID_PRIVATE_KEY secret (backend only)
  */
 
 import { useState } from "react";
@@ -22,6 +26,14 @@ import { useWebsite } from "@/contexts/WebsiteContext";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+
+/**
+ * AUTHORIZED FIREBASE VAPID PUBLIC KEY
+ * This is the SINGLE SOURCE OF TRUTH for all Web Push subscriptions.
+ * DO NOT CHANGE unless you are rotating the Firebase VAPID keys.
+ * The private key is stored in FIREBASE_VAPID_PRIVATE_KEY secret.
+ */
+const FIREBASE_VAPID_PUBLIC_KEY = "BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I";
 
 // Generate a unique website ID
 const generateWebsiteId = () => {
@@ -43,7 +55,6 @@ interface GeneratedWebsite {
   url: string;
   description?: string;
   vapidPublicKey: string;
-  vapidPrivateKey: string;
   apiToken: string;
 }
 
@@ -78,42 +89,15 @@ export default function NewWebsitePage() {
         throw new Error("You must be logged in to create a website");
       }
 
-      // Generate VAPID keys via secure backend edge function
-      console.log('[NewWebsite] Calling generate-vapid-keys edge function...');
-      
-      const { data: vapidData, error: vapidError } = await supabase.functions.invoke(
-        'generate-vapid-keys',
-        {
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-          },
-        }
-      );
-
-      if (vapidError) {
-        console.error('[NewWebsite] VAPID generation error:', vapidError);
-        throw new Error(`Failed to generate VAPID keys: ${vapidError.message}`);
-      }
-
-      if (!vapidData?.success || !vapidData?.publicKey || !vapidData?.privateKey) {
-        console.error('[NewWebsite] Invalid VAPID response:', vapidData);
-        throw new Error('Invalid response from VAPID key generator');
-      }
-
-      // Validate the public key format
-      if (!vapidData.publicKey.startsWith('B')) {
-        console.error('[NewWebsite] Invalid public key format - does not start with B');
-        throw new Error('Generated VAPID public key is invalid (must start with B)');
-      }
-
-      console.log('[NewWebsite] VAPID keys generated successfully');
-      console.log('[NewWebsite] Public key starts with:', vapidData.publicKey.substring(0, 10));
+      console.log('[NewWebsite] Using authorized Firebase VAPID public key');
+      console.log('[NewWebsite] Key prefix:', FIREBASE_VAPID_PUBLIC_KEY.substring(0, 20) + '...');
       
       const websiteId = generateWebsiteId();
       const apiToken = generateApiToken(websiteId);
       const cleanUrl = url.trim().replace(/\/$/, ""); // Remove trailing slash
       
-      // Insert website into database
+      // Insert website into database with the authorized Firebase VAPID key
+      // Note: We store a placeholder for private key since it's in secrets
       const { error: insertError } = await supabase
         .from('websites')
         .insert({
@@ -121,8 +105,8 @@ export default function NewWebsitePage() {
           name: name.trim(),
           url: cleanUrl,
           description: description.trim() || null,
-          vapid_public_key: vapidData.publicKey,
-          vapid_private_key: vapidData.privateKey,
+          vapid_public_key: FIREBASE_VAPID_PUBLIC_KEY,
+          vapid_private_key: 'STORED_IN_SECRETS', // Private key is in FIREBASE_VAPID_PRIVATE_KEY secret
           api_token: apiToken,
           user_id: session.user.id,
           status: 'pending',
@@ -139,8 +123,7 @@ export default function NewWebsitePage() {
         name: name.trim(),
         url: cleanUrl,
         description: description.trim() || undefined,
-        vapidPublicKey: vapidData.publicKey,
-        vapidPrivateKey: vapidData.privateKey,
+        vapidPublicKey: FIREBASE_VAPID_PUBLIC_KEY,
         apiToken: apiToken,
       });
       
@@ -182,7 +165,9 @@ export default function NewWebsitePage() {
   const supabaseAnonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
   // ============================================================================
-  // REFACTORED SERVICE WORKER - Self-configuring via query params
+  // SERVICE WORKER - Uses authorized Firebase VAPID key (passed via query params)
+  // The SW receives config via query params, handles all push logic.
+  // VAPID KEY CONSISTENCY: All websites use the same Firebase VAPID key.
   // ============================================================================
   const serviceWorkerCode = generatedWebsite ? `/**
  * Sigme Push Notification Service Worker
@@ -191,6 +176,10 @@ export default function NewWebsitePage() {
  * 
  * SINGLE SOURCE OF TRUTH for all push logic.
  * Config received via query params on registration.
+ * 
+ * VAPID KEY CONSISTENCY:
+ * This service worker uses the authorized Firebase VAPID public key.
+ * All subscriptions MUST use the same key for push to work.
  */
 
 // Configuration (injected via query params)
@@ -487,13 +476,14 @@ self.addEventListener('notificationclose', (event) => {
 log('Service Worker ready');
 ` : "";
 
-  // Minimal integration script
+  // Minimal integration script - uses the authorized Firebase VAPID key
   const integrationScript = generatedWebsite ? `<!-- Sigme Push Notifications -->
+<!-- VAPID Key: Authorized Firebase VAPID public key -->
 <script>
 (function() {
   var config = {
     websiteId: '${generatedWebsite.id}',
-    vapid: '${generatedWebsite.vapidPublicKey}',
+    vapid: '${FIREBASE_VAPID_PUBLIC_KEY}',
     api: '${supabaseUrl}/functions/v1',
     key: '${supabaseAnonKey}'
   };
@@ -552,7 +542,7 @@ log('Service Worker ready');
                 "hidden sm:block text-sm font-medium",
                 step >= s ? "text-foreground" : "text-muted-foreground"
               )}>
-                {s === 1 ? "Website Details" : s === 2 ? "Keys Generated" : "Integration"}
+                {s === 1 ? "Website Details" : s === 2 ? "Configuration" : "Integration"}
               </span>
               {s < 3 && (
                 <ArrowRight className="w-4 h-4 text-muted-foreground mx-2" />
@@ -628,11 +618,11 @@ log('Service Worker ready');
                 className="w-full"
               >
                 {isGenerating ? (
-                  <>Generating Keys...</>
+                  <>Creating Website...</>
                 ) : (
                   <>
-                    Generate VAPID Keys
-                    <Key className="w-4 h-4 ml-2" />
+                    Create Website
+                    <ArrowRight className="w-4 h-4 ml-2" />
                   </>
                 )}
               </Button>
@@ -640,7 +630,7 @@ log('Service Worker ready');
           </div>
         )}
 
-        {/* Step 2: Keys Generated */}
+        {/* Step 2: Configuration Ready */}
         {step === 2 && generatedWebsite && (
           <div className="p-8 rounded-2xl bg-card border border-border/50">
             <div className="flex items-center gap-3 mb-6">
@@ -648,8 +638,8 @@ log('Service Worker ready');
                 <Check className="w-6 h-6 text-success" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-foreground">Keys Generated!</h2>
-                <p className="text-sm text-muted-foreground">Your VAPID keys are ready</p>
+                <h2 className="text-xl font-semibold text-foreground">Website Created!</h2>
+                <p className="text-sm text-muted-foreground">Ready for push notifications</p>
               </div>
             </div>
 
@@ -669,17 +659,20 @@ log('Service Worker ready');
               </div>
 
               <div className="p-4 rounded-lg bg-muted/50">
-                <Label className="text-xs text-muted-foreground">Public VAPID Key</Label>
+                <Label className="text-xs text-muted-foreground">Public VAPID Key (Firebase)</Label>
                 <div className="flex items-center gap-2 mt-1">
-                  <code className="text-xs font-mono flex-1 break-all">{generatedWebsite.vapidPublicKey}</code>
+                  <code className="text-xs font-mono flex-1 break-all">{FIREBASE_VAPID_PUBLIC_KEY}</code>
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => copyToClipboard(generatedWebsite.vapidPublicKey, "Public Key")}
+                    onClick={() => copyToClipboard(FIREBASE_VAPID_PUBLIC_KEY, "Public Key")}
                   >
                     <Copy className="w-4 h-4" />
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  This is the authorized Firebase VAPID key used for all push subscriptions
+                </p>
               </div>
             </div>
 

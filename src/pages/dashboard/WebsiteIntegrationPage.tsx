@@ -4,9 +4,12 @@
  * Shows integration code, service worker, and setup instructions
  * with actual Supabase endpoints.
  * 
- * REFACTORED: Uses a self-configuring service worker approach.
- * The SW receives all config via query params, handles all push logic,
- * conflict resolution, and automatic subscription.
+ * IMPORTANT: Uses a SINGLE authorized Firebase VAPID key pair for ALL websites.
+ * This ensures cryptographic consistency across the entire push notification system.
+ * 
+ * AUTHORIZED VAPID KEY (from Firebase Cloud Messaging):
+ * Public: BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I
+ * Private: Stored in FIREBASE_VAPID_PRIVATE_KEY secret (backend only)
  */
 
 import { useParams, Link } from "react-router-dom";
@@ -25,6 +28,14 @@ import {
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+
+/**
+ * AUTHORIZED FIREBASE VAPID PUBLIC KEY
+ * This is the SINGLE SOURCE OF TRUTH for all Web Push subscriptions.
+ * DO NOT CHANGE unless you are rotating the Firebase VAPID keys.
+ * The private key is stored in FIREBASE_VAPID_PRIVATE_KEY secret.
+ */
+const FIREBASE_VAPID_PUBLIC_KEY = "BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I";
 
 export default function WebsiteIntegrationPage() {
   const { websiteId } = useParams();
@@ -58,9 +69,9 @@ export default function WebsiteIntegrationPage() {
   }
 
   // ============================================================================
-  // REFACTORED SERVICE WORKER
+  // SERVICE WORKER - Uses authorized Firebase VAPID key (passed via query params)
   // Single source of truth for ALL push notification logic.
-  // Receives config via query params, handles conflicts, auto-subscribes.
+  // VAPID KEY CONSISTENCY: All websites use the same Firebase VAPID key.
   // ============================================================================
   const serviceWorkerCode = `/**
  * Sigme Push Notification Service Worker
@@ -72,6 +83,10 @@ export default function WebsiteIntegrationPage() {
  * - Tracks delivery, clicks, dismissals
  * - Handles notification actions and URLs
  * - Auto-subscribes and resolves VAPID conflicts
+ * 
+ * VAPID KEY CONSISTENCY:
+ * This service worker uses the authorized Firebase VAPID public key.
+ * All subscriptions MUST use the same key for push to work.
  */
 
 // ============================================================================
@@ -470,10 +485,11 @@ log('Service Worker script loaded and ready');
 `;
 
   // ============================================================================
-  // MINIMAL INTEGRATION SCRIPT (2 lines conceptually, expanded for readability)
+  // MINIMAL INTEGRATION SCRIPT - Uses authorized Firebase VAPID key
   // Just registers SW with config params and requests permission
   // ============================================================================
   const integrationScript = `<!-- Sigme Push Notifications -->
+<!-- VAPID Key: Authorized Firebase VAPID public key -->
 <!-- Add this before </body> on your website -->
 <script>
 /**
@@ -484,13 +500,14 @@ log('Service Worker script loaded and ready');
  * 2. Requests notification permission on load
  * 3. The SW handles EVERYTHING else automatically
  * 
- * No manual steps required!
+ * VAPID Key Consistency:
+ * Uses the authorized Firebase VAPID public key for all subscriptions.
  */
 (function() {
-  // Configuration
+  // Configuration - uses authorized Firebase VAPID key
   var config = {
     websiteId: '${website.id}',
-    vapid: '${website.vapidPublicKey}',
+    vapid: '${FIREBASE_VAPID_PUBLIC_KEY}',
     api: '${SUPABASE_URL}/functions/v1',
     key: '${SUPABASE_ANON_KEY}'
   };
@@ -752,36 +769,34 @@ log('Service Worker script loaded and ready');
                 </div>
                 
                 <div className="space-y-2">
-                  <Label>Public VAPID Key</Label>
+                  <Label>Public VAPID Key (Firebase - shared across all websites)</Label>
                   <div className="flex gap-2">
                     <code className="flex-1 px-3 py-2 rounded bg-muted text-sm break-all">
-                      {website.vapidPublicKey}
+                      {FIREBASE_VAPID_PUBLIC_KEY}
                     </code>
                     <Button
                       variant="outline"
                       size="icon"
-                      onClick={() => copyToClipboard(website.vapidPublicKey || "", "VAPID Public Key")}
+                      onClick={() => copyToClipboard(FIREBASE_VAPID_PUBLIC_KEY, "VAPID Public Key")}
                     >
                       <Copy className="w-4 h-4" />
                     </Button>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    This is the authorized Firebase VAPID key used for all push subscriptions
+                  </p>
                 </div>
                 
                 <div className="space-y-2">
-                  <Label>Private VAPID Key (keep secret!)</Label>
+                  <Label>Private VAPID Key</Label>
                   <div className="flex gap-2">
                     <code className="flex-1 px-3 py-2 rounded bg-muted text-sm break-all">
-                      {website.vapidPrivateKey ? "••••••••••••••••••••••••" : "Not available"}
+                      Stored securely in backend secrets (FIREBASE_VAPID_PRIVATE_KEY)
                     </code>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      onClick={() => copyToClipboard(website.vapidPrivateKey || "", "VAPID Private Key")}
-                      disabled={!website.vapidPrivateKey}
-                    >
-                      <Copy className="w-4 h-4" />
-                    </Button>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    The private key is never exposed to the frontend for security
+                  </p>
                 </div>
                 
                 <div className="space-y-2">
