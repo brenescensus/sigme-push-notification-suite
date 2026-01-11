@@ -142,6 +142,23 @@ Deno.serve(async (req) => {
 
     console.log(`[SendNotification] Sending to ${subscribers.length} subscribers`);
 
+    // Get Firebase VAPID keys from secrets (these must match what was used to create subscriptions)
+    const firebaseVapidPublicKey = Deno.env.get('FIREBASE_VAPID_PUBLIC_KEY');
+    const firebaseVapidPrivateKey = Deno.env.get('FIREBASE_VAPID_PRIVATE_KEY');
+    
+    if (!firebaseVapidPublicKey || !firebaseVapidPrivateKey) {
+      console.error('[SendNotification] Firebase VAPID keys not configured in secrets');
+      return new Response(
+        JSON.stringify({ 
+          error: 'VAPID keys not configured',
+          message: 'Please add FIREBASE_VAPID_PUBLIC_KEY and FIREBASE_VAPID_PRIVATE_KEY secrets' 
+        }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log('[SendNotification] Using Firebase VAPID public key:', firebaseVapidPublicKey.substring(0, 20) + '...');
+
     // Separate by platform
     const webSubscribers = subscribers.filter((s: any) => 
       (s.platform === 'web' || !s.platform) && s.endpoint && s.p256dh_key && s.auth_key
@@ -165,8 +182,8 @@ Deno.serve(async (req) => {
           sendWebPushWithRetry(
             subscriber,
             notification,
-            website.vapid_public_key,
-            website.vapid_private_key,
+            firebaseVapidPublicKey,
+            firebaseVapidPrivateKey,
             website.url
           )
         )
