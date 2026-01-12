@@ -183,11 +183,13 @@ serve(async (req) => {
       );
     }
     
-    // Check website is active
-    if (website.status !== 'active') {
-      console.error('[RegisterSubscriber] Website not active:', websiteId);
+    // Check website is active enough to accept subscribers.
+    // NOTE: We allow `pending` websites to register subscribers so the setup flow works
+    // before verification is completed. This does NOT generate or rotate any VAPID keys.
+    if (!['active', 'pending'].includes(website.status)) {
+      console.error('[RegisterSubscriber] Website not accepting subscribers:', websiteId, 'status:', website.status);
       return new Response(
-        JSON.stringify({ error: 'Website not active' }),
+        JSON.stringify({ error: 'Website not accepting subscribers' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
