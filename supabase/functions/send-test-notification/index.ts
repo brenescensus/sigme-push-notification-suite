@@ -271,7 +271,7 @@ async function sendWebPushNotification(
     });
 
     const audience = new URL(endpoint).origin;
-    const vapidJwt = await createVapidJwt(audience, vapidPrivateKey, websiteUrl);
+    const vapidJwt = await createVapidJwt(audience, vapidPublicKey, vapidPrivateKey, websiteUrl);
 
     const encryptedBody = await encryptPayload(payload, p256dhKey, authKey);
 
@@ -342,13 +342,14 @@ async function sendWebPushNotification(
 
 async function createVapidJwt(
   audience: string,
+  publicKeyBase64: string,
   privateKeyBase64: string,
   subject: string
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  
+
   const header = { typ: 'JWT', alg: 'ES256' };
-  
+
   let sub = 'mailto:noreply@sigme.app';
   try {
     sub = subject.startsWith('mailto:')
@@ -366,7 +367,7 @@ async function createVapidJwt(
   const payloadB64 = base64UrlEncode(JSON.stringify(payload));
   const signingInput = `${headerB64}.${payloadB64}`;
 
-  const privateKey = await importVapidPrivateKey(privateKeyBase64);
+  const privateKey = await importVapidSigningKey(publicKeyBase64, privateKeyBase64);
 
   const signature = await crypto.subtle.sign(
     { name: 'ECDSA', hash: 'SHA-256' },
@@ -381,77 +382,48 @@ async function createVapidJwt(
   return `${signingInput}.${signatureB64}`;
 }
 
-async function importVapidPrivateKey(privateKeyBase64: string): Promise<CryptoKey> {
-  console.log('[VAPID] Importing private key, length:', privateKeyBase64.length, 'chars');
-  
-  // Try to decode the key - handle both base64url and standard base64
-  let privateKeyBytes: Uint8Array;
+async function importVapidSigningKey(
+  publicKeyBase64: string,
+  privateKeyBase64: string
+): Promise<CryptoKey> {
+  // Use JWK import (most reliable across runtimes) so we avoid PKCS8 encoding pitfalls.
+  // publicKey: base64url encoded uncompressed point (65 bytes: 0x04 || X(32) || Y(32))
+  // privateKey: base64url encoded 32-byte scalar ("d")
+
+  const pub = base64UrlDecode(publicKeyBase64);
+  if (pub.length !== 65 || pub[0] !== 0x04) {
+    throw new Error(`[VAPID] Invalid public key format/length: ${pub.length}`);
+  }
+
+  const x = pub.slice(1, 33);
+  const y = pub.slice(33, 65);
+
+  // Decode private key (base64url or base64)
+  let dBytes: Uint8Array;
   try {
-    privateKeyBytes = base64UrlDecode(privateKeyBase64);
-  } catch (e) {
-    // Try standard base64 if base64url fails
-    console.log('[VAPID] base64url decode failed, trying standard base64');
-    try {
-      const binary = atob(privateKeyBase64);
-      privateKeyBytes = Uint8Array.from(binary, c => c.charCodeAt(0));
-    } catch (e2) {
-      console.error('[VAPID] Failed to decode private key with both methods');
-      throw new Error('Invalid private key encoding');
-    }
+    dBytes = base64UrlDecode(privateKeyBase64);
+  } catch {
+    const binary = atob(privateKeyBase64);
+    dBytes = Uint8Array.from(binary, c => c.charCodeAt(0));
   }
-  
-  console.log('[VAPID] Decoded key bytes:', privateKeyBytes.length);
-  
-  // If the key is already in PKCS8 format (typically 138 bytes for P-256), use it directly
-  if (privateKeyBytes.length > 32) {
-    console.log('[VAPID] Key appears to be PKCS8 format, importing directly');
-    const keyBuffer = new ArrayBuffer(privateKeyBytes.length);
-    new Uint8Array(keyBuffer).set(privateKeyBytes);
-    
-    try {
-      return await crypto.subtle.importKey(
-        'pkcs8',
-        keyBuffer,
-        { name: 'ECDSA', namedCurve: 'P-256' },
-        false,
-        ['sign']
-      );
-    } catch (pkcs8Error) {
-      console.log('[VAPID] PKCS8 import failed, will try wrapping as raw key');
-      // If direct PKCS8 import fails, try treating first 32 bytes as raw key
-      privateKeyBytes = privateKeyBytes.slice(privateKeyBytes.length - 32);
-    }
+
+  if (dBytes.length !== 32) {
+    // Sometimes people paste PKCS8; if so, fail loudly so we can correct the secret.
+    throw new Error(`[VAPID] Private key must be 32 bytes base64url (got ${dBytes.length})`);
   }
-  
-  // For raw 32-byte private keys, wrap in PKCS8 structure
-  console.log('[VAPID] Wrapping raw key in PKCS8 structure');
-  
-  // PKCS8 header for P-256 EC private key
-  const pkcs8Header = new Uint8Array([
-    0x30, 0x41, // SEQUENCE, length 65
-    0x02, 0x01, 0x00, // INTEGER 0 (version)
-    0x30, 0x13, // SEQUENCE, length 19 (algorithm identifier)
-    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // OID 1.2.840.10045.2.1 (ecPublicKey)
-    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, // OID 1.2.840.10045.3.1.7 (P-256)
-    0x04, 0x27, // OCTET STRING, length 39
-    0x30, 0x25, // SEQUENCE, length 37
-    0x02, 0x01, 0x01, // INTEGER 1 (version)
-    0x04, 0x20, // OCTET STRING, length 32 (private key)
-  ]);
 
-  const rawKey = privateKeyBytes.slice(0, 32);
-  const pkcs8Key = new Uint8Array(pkcs8Header.length + 32);
-  pkcs8Key.set(pkcs8Header);
-  pkcs8Key.set(rawKey, pkcs8Header.length);
+  const jwk: JsonWebKey = {
+    kty: 'EC',
+    crv: 'P-256',
+    x: base64UrlEncode(x),
+    y: base64UrlEncode(y),
+    d: base64UrlEncode(dBytes),
+    ext: true,
+  };
 
-  const keyBuffer = new ArrayBuffer(pkcs8Key.length);
-  new Uint8Array(keyBuffer).set(pkcs8Key);
-  
-  console.log('[VAPID] Importing wrapped PKCS8 key, total size:', pkcs8Key.length);
-  
   return await crypto.subtle.importKey(
-    'pkcs8',
-    keyBuffer,
+    'jwk',
+    jwk,
     { name: 'ECDSA', namedCurve: 'P-256' },
     false,
     ['sign']
