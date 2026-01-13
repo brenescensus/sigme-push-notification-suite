@@ -1044,8 +1044,45 @@ function base64UrlEncode(input: string | Uint8Array): string {
 }
 
 function base64UrlDecode(input: string): Uint8Array {
-  let base64 = input.replace(/-/g, '+').replace(/_/g, '/');
-  while (base64.length % 4) base64 += '=';
-  const binary = atob(base64);
-  return Uint8Array.from(binary, c => c.charCodeAt(0));
+  // Robust base64url decoder that handles edge cases
+  try {
+    // Clean input - remove whitespace
+    const cleaned = input.trim().replace(/\s/g, '');
+    
+    // Convert base64url to base64
+    let base64 = cleaned.replace(/-/g, '+').replace(/_/g, '/');
+    
+    // Add padding
+    while (base64.length % 4) base64 += '=';
+    
+    // Use a lookup table approach for robustness
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const lookup = new Uint8Array(256);
+    for (let i = 0; i < chars.length; i++) {
+      lookup[chars.charCodeAt(i)] = i;
+    }
+    
+    // Remove padding for calculation
+    const paddingLen = (base64.match(/=+$/) || [''])[0].length;
+    const len = (base64.length * 3 / 4) - paddingLen;
+    
+    const bytes = new Uint8Array(len);
+    let p = 0;
+    
+    for (let i = 0; i < base64.length; ) {
+      const c1 = lookup[base64.charCodeAt(i++)];
+      const c2 = lookup[base64.charCodeAt(i++)];
+      const c3 = lookup[base64.charCodeAt(i++)];
+      const c4 = lookup[base64.charCodeAt(i++)];
+      
+      if (p < len) bytes[p++] = (c1 << 2) | (c2 >> 4);
+      if (p < len) bytes[p++] = ((c2 & 15) << 4) | (c3 >> 2);
+      if (p < len) bytes[p++] = ((c3 & 3) << 6) | c4;
+    }
+    
+    return bytes;
+  } catch (e) {
+    console.error('[base64UrlDecode] Error decoding:', input.substring(0, 20) + '...', e);
+    throw new Error(`InvalidEncoding: ${e}`);
+  }
 }
