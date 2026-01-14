@@ -1,5 +1,5 @@
-import { ReactNode } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { ReactNode, useState, useEffect } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   Users,
@@ -16,6 +16,8 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { WebsiteSelector } from "@/components/dashboard/WebsiteSelector";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 import sigmeLogo from "@/assets/sigme-logo.png";
 
 interface DashboardLayoutProps {
@@ -32,8 +34,24 @@ const navigation = [
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
 ];
 
-function Sidebar({ className }: { className?: string }) {
+function Sidebar({ className, onLogout }: { className?: string; onLogout: () => void }) {
   const location = useLocation();
+  const [user, setUser] = useState<{ email?: string; name?: string } | null>(null);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        setUser({
+          email: user.email,
+          name: user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
+        });
+      }
+    });
+  }, []);
+
+  const initials = user?.name
+    ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+    : 'U';
 
   return (
     <div className={cn("flex flex-col h-full bg-sidebar border-r border-sidebar-border", className)}>
@@ -71,13 +89,19 @@ function Sidebar({ className }: { className?: string }) {
       <div className="p-3 border-t border-sidebar-border">
         <div className="flex items-center gap-3 px-3 py-2">
           <div className="w-9 h-9 rounded-full gradient-primary flex items-center justify-center text-sm font-medium text-primary-foreground">
-            JD
+            {initials}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-sidebar-foreground truncate">John Doe</p>
-            <p className="text-xs text-muted-foreground truncate">john@example.com</p>
+            <p className="text-sm font-medium text-sidebar-foreground truncate">{user?.name || 'User'}</p>
+            <p className="text-xs text-muted-foreground truncate">{user?.email || ''}</p>
           </div>
-          <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
+          <Button 
+            variant="ghost" 
+            size="icon-sm" 
+            className="text-muted-foreground hover:text-foreground"
+            onClick={onLogout}
+            title="Sign out"
+          >
             <LogOut className="w-4 h-4" />
           </Button>
         </div>
@@ -88,16 +112,28 @@ function Sidebar({ className }: { className?: string }) {
 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   
   // Get current page title
   const currentPage = navigation.find((item) => item.href === location.pathname);
   const pageTitle = currentPage?.name || "Dashboard";
 
+  const handleLogout = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+      toast.success("Signed out successfully");
+      navigate("/auth");
+    } catch (error: any) {
+      toast.error(error.message || "Failed to sign out");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background">
       {/* Desktop Sidebar */}
       <aside className="fixed left-0 top-0 bottom-0 w-64 hidden lg:block">
-        <Sidebar />
+        <Sidebar onLogout={handleLogout} />
       </aside>
 
       {/* Mobile Header */}
@@ -113,7 +149,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
             </Button>
           </SheetTrigger>
           <SheetContent side="left" className="p-0 w-64">
-            <Sidebar />
+            <Sidebar onLogout={handleLogout} />
           </SheetContent>
         </Sheet>
       </header>
