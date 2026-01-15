@@ -258,7 +258,14 @@ async function sendWebPushNotification(
   websiteUrl: string
 ): Promise<{ success: boolean; message: string; platform: string; statusCode: number }> {
   try {
-    console.log('[WebPush] Sending to:', endpoint.substring(0, 60) + '...');
+    console.log('[WebPush] ========================================');
+    console.log('[WebPush] SENDING NOTIFICATION');
+    console.log('[WebPush] ========================================');
+    console.log('[WebPush] Endpoint:', endpoint.substring(0, 80) + '...');
+    console.log('[WebPush] p256dh key length:', p256dhKey?.length || 0);
+    console.log('[WebPush] auth key length:', authKey?.length || 0);
+    console.log('[WebPush] VAPID public key prefix:', vapidPublicKey?.substring(0, 30) + '...');
+    console.log('[WebPush] Website URL:', websiteUrl);
 
     const payload = JSON.stringify({
       title: notification.title,
@@ -270,14 +277,26 @@ async function sendWebPushNotification(
       timestamp: Date.now(),
     });
 
-    const audience = new URL(endpoint).origin;
-    const vapidJwt = await createVapidJwt(audience, vapidPublicKey, vapidPrivateKey, websiteUrl);
+    console.log('[WebPush] Payload size:', payload.length, 'bytes');
+    console.log('[WebPush] Payload preview:', payload.substring(0, 200));
 
+    const audience = new URL(endpoint).origin;
+    console.log('[WebPush] VAPID audience:', audience);
+    
+    console.log('[WebPush] Creating VAPID JWT...');
+    const vapidJwt = await createVapidJwt(audience, vapidPublicKey, vapidPrivateKey, websiteUrl);
+    console.log('[WebPush] VAPID JWT created, length:', vapidJwt.length);
+
+    console.log('[WebPush] Encrypting payload with AES-128-GCM...');
     const encryptedBody = await encryptPayload(payload, p256dhKey, authKey);
+    console.log('[WebPush] Encrypted body size:', encryptedBody.length, 'bytes');
 
     // Convert Uint8Array to ArrayBuffer for fetch body
     const bodyBuffer = new ArrayBuffer(encryptedBody.length);
     new Uint8Array(bodyBuffer).set(encryptedBody);
+    
+    console.log('[WebPush] Sending HTTP POST to push service...');
+    const startTime = Date.now();
     
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -291,10 +310,16 @@ async function sendWebPushNotification(
       body: bodyBuffer,
     });
 
+    const elapsed = Date.now() - startTime;
     const statusCode = response.status;
+    console.log('[WebPush] Response received in', elapsed, 'ms');
     console.log('[WebPush] Response status:', statusCode);
+    console.log('[WebPush] Response status text:', response.statusText);
 
     if (response.ok || statusCode === 201) {
+      console.log('[WebPush] ✓ SUCCESS - Notification delivered to push service');
+      console.log('[WebPush] The push service has accepted the notification for delivery.');
+      console.log('[WebPush] Browser should receive push event shortly.');
       return {
         success: true,
         message: 'Push notification sent successfully',
@@ -304,9 +329,13 @@ async function sendWebPushNotification(
     }
 
     const errorText = await response.text();
-    console.error('[WebPush] Error:', statusCode, errorText);
+    console.error('[WebPush] ✗ FAILED - Push service rejected notification');
+    console.error('[WebPush] Status:', statusCode);
+    console.error('[WebPush] Error body:', errorText);
 
     if (statusCode === 404 || statusCode === 410) {
+      console.error('[WebPush] Subscription is expired or no longer valid.');
+      console.error('[WebPush] The browser has unsubscribed or endpoint changed.');
       return {
         success: false,
         message: 'Subscription expired or invalid',
@@ -315,6 +344,9 @@ async function sendWebPushNotification(
       };
     }
     if (statusCode === 401 || statusCode === 403) {
+      console.error('[WebPush] VAPID authentication failed.');
+      console.error('[WebPush] This usually means the private key does not match the public key');
+      console.error('[WebPush] used when the browser created the subscription.');
       return {
         success: false,
         message: `VAPID authentication failed: ${errorText}`,
@@ -330,7 +362,10 @@ async function sendWebPushNotification(
       statusCode,
     };
   } catch (error) {
-    console.error('[WebPush] Exception:', error);
+    console.error('[WebPush] ✗ EXCEPTION during notification send:');
+    console.error('[WebPush] Error name:', (error as any)?.name);
+    console.error('[WebPush] Error message:', (error as any)?.message);
+    console.error('[WebPush] Full error:', error);
     return {
       success: false,
       message: String(error),

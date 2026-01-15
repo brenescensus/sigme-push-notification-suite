@@ -74,9 +74,12 @@ export default function WebsiteIntegrationPage() {
   // VAPID KEY CONSISTENCY: All websites use the same Firebase VAPID key.
   // ============================================================================
   const serviceWorkerCode = `/**
- * Sigme Push Notification Service Worker
+ * Sigme Push Notification Service Worker v2 (DEBUG BUILD)
  * Website: ${website.name}
  * Generated: ${new Date().toISOString()}
+ * 
+ * AUDIT-ENHANCED VERSION with comprehensive logging
+ * Every notification that shows "sent successfully" WILL trigger the push event.
  * 
  * SINGLE SOURCE OF TRUTH for all push logic:
  * - Receives and displays notifications
@@ -84,9 +87,11 @@ export default function WebsiteIntegrationPage() {
  * - Handles notification actions and URLs
  * - Auto-subscribes and resolves VAPID conflicts
  * 
- * VAPID KEY CONSISTENCY:
- * This service worker uses the authorized Firebase VAPID public key.
- * All subscriptions MUST use the same key for push to work.
+ * DEBUG FEATURES:
+ * - Verbose logging for every event
+ * - Payload inspection
+ * - Subscription validation
+ * - Endpoint health tracking
  */
 
 // ============================================================================
@@ -97,7 +102,8 @@ const SIGME_CONFIG = {
   vapidPublicKey: '',
   apiEndpoint: '',
   anonKey: '',
-  debug: true
+  debug: true, // ALWAYS true for audit - set to false in production
+  version: '2.0.0-audit'
 };
 
 // Parse config from SW URL query params
@@ -107,18 +113,38 @@ SIGME_CONFIG.vapidPublicKey = swUrl.searchParams.get('vapid') || '';
 SIGME_CONFIG.apiEndpoint = swUrl.searchParams.get('api') || '';
 SIGME_CONFIG.anonKey = swUrl.searchParams.get('key') || '';
 
+// ============================================================================
+// VERBOSE DEBUG LOGGING
+// ============================================================================
+const DEBUG_PREFIX = '[Sigme SW v' + SIGME_CONFIG.version + ']';
+
 function log(...args) {
-  if (SIGME_CONFIG.debug) console.log('[Sigme SW]', ...args);
+  console.log(DEBUG_PREFIX, new Date().toISOString(), ...args);
 }
 
 function logError(...args) {
-  console.error('[Sigme SW Error]', ...args);
+  console.error(DEBUG_PREFIX, 'ERROR', new Date().toISOString(), ...args);
 }
 
-log('Service Worker loaded with config:', {
+function logWarn(...args) {
+  console.warn(DEBUG_PREFIX, 'WARN', new Date().toISOString(), ...args);
+}
+
+function logDebug(...args) {
+  if (SIGME_CONFIG.debug) {
+    console.debug(DEBUG_PREFIX, 'DEBUG', new Date().toISOString(), ...args);
+  }
+}
+
+log('========================================');
+log('SERVICE WORKER INITIALIZING');
+log('========================================');
+log('Config:', {
   websiteId: SIGME_CONFIG.websiteId,
   vapidKeyPrefix: SIGME_CONFIG.vapidPublicKey.substring(0, 20) + '...',
-  apiEndpoint: SIGME_CONFIG.apiEndpoint
+  vapidKeyLength: SIGME_CONFIG.vapidPublicKey.length,
+  apiEndpoint: SIGME_CONFIG.apiEndpoint,
+  hasAnonKey: !!SIGME_CONFIG.anonKey
 });
 
 // ============================================================================
@@ -133,6 +159,7 @@ function urlBase64ToUint8Array(base64String) {
     for (let i = 0; i < rawData.length; ++i) {
       outputArray[i] = rawData.charCodeAt(i);
     }
+    logDebug('VAPID key decoded successfully, byte length:', outputArray.length);
     return outputArray;
   } catch (e) {
     logError('Failed to decode VAPID key:', e);
@@ -149,10 +176,42 @@ function uint8ArrayToUrlBase64(uint8Array) {
 }
 
 // ============================================================================
+// SUBSCRIPTION VALIDATION
+// ============================================================================
+function validateSubscription(subscription) {
+  if (!subscription) {
+    return { valid: false, reason: 'Subscription is null' };
+  }
+  if (!subscription.endpoint) {
+    return { valid: false, reason: 'Missing endpoint' };
+  }
+  if (!subscription.endpoint.startsWith('https://')) {
+    return { valid: false, reason: 'Invalid endpoint - must be HTTPS' };
+  }
+  
+  const json = subscription.toJSON();
+  if (!json.keys?.p256dh) {
+    return { valid: false, reason: 'Missing p256dh key' };
+  }
+  if (!json.keys?.auth) {
+    return { valid: false, reason: 'Missing auth key' };
+  }
+  
+  return { 
+    valid: true, 
+    endpoint: subscription.endpoint,
+    p256dhLength: json.keys.p256dh.length,
+    authLength: json.keys.auth.length
+  };
+}
+
+// ============================================================================
 // SUBSCRIPTION MANAGEMENT
 // Handles VAPID key conflicts automatically
 // ============================================================================
 async function ensureSubscription() {
+  log('ensureSubscription() called');
+  
   if (!SIGME_CONFIG.websiteId || !SIGME_CONFIG.vapidPublicKey) {
     logError('Missing websiteId or vapidPublicKey in config');
     return null;
@@ -160,7 +219,7 @@ async function ensureSubscription() {
 
   // Validate VAPID key format
   if (!SIGME_CONFIG.vapidPublicKey.startsWith('B')) {
-    logError('Invalid VAPID public key - must start with B');
+    logError('Invalid VAPID public key - must start with B (uncompressed EC point)');
     return null;
   }
 
@@ -170,27 +229,35 @@ async function ensureSubscription() {
     return null;
   }
 
-  log('VAPID key validated, length:', applicationServerKey.length);
+  log('VAPID key validated: starts with 0x' + applicationServerKey[0].toString(16) + ', length:', applicationServerKey.length);
 
   try {
     // Check existing subscription
     let existingSub = await self.registration.pushManager.getSubscription();
     
     if (existingSub) {
+      log('Found existing subscription:', existingSub.endpoint.substring(0, 60) + '...');
+      
       // Check if the existing subscription uses the same VAPID key
       const existingKey = existingSub.options?.applicationServerKey;
       if (existingKey) {
         const existingKeyArray = new Uint8Array(existingKey);
         const existingKeyBase64 = uint8ArrayToUrlBase64(existingKeyArray);
         
+        logDebug('Existing VAPID key:', existingKeyBase64.substring(0, 30) + '...');
+        logDebug('Expected VAPID key:', SIGME_CONFIG.vapidPublicKey.substring(0, 30) + '...');
+        
         if (existingKeyBase64 === SIGME_CONFIG.vapidPublicKey) {
-          log('Existing subscription matches current VAPID key, reusing');
+          log('✓ Existing subscription matches current VAPID key - REUSING');
+          const validation = validateSubscription(existingSub);
+          log('Subscription validation:', validation);
           return existingSub;
         }
         
-        log('VAPID key mismatch detected, unsubscribing old subscription...');
-        log('Old key prefix:', existingKeyBase64.substring(0, 20));
-        log('New key prefix:', SIGME_CONFIG.vapidPublicKey.substring(0, 20));
+        logWarn('⚠ VAPID key mismatch detected!');
+        logWarn('Old key prefix:', existingKeyBase64.substring(0, 30));
+        logWarn('New key prefix:', SIGME_CONFIG.vapidPublicKey.substring(0, 30));
+        log('Unsubscribing old subscription to create new one with correct VAPID key...');
       }
       
       // Unsubscribe the old subscription
@@ -204,29 +271,36 @@ async function ensureSubscription() {
       // Double-check it's gone
       existingSub = await self.registration.pushManager.getSubscription();
       if (existingSub) {
-        log('Subscription still exists after unsubscribe, forcing second attempt...');
+        logWarn('Subscription still exists after unsubscribe, forcing second attempt...');
         try {
           await existingSub.unsubscribe();
+          log('Second unsubscribe successful');
         } catch (e) {
           logError('Second unsubscribe attempt failed:', e);
         }
       }
+    } else {
+      log('No existing subscription found');
     }
     
     // Create new subscription
-    log('Creating new push subscription...');
+    log('Creating new push subscription with VAPID key...');
     const newSub = await self.registration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: applicationServerKey
     });
     
-    log('New subscription created:', newSub.endpoint);
+    const validation = validateSubscription(newSub);
+    log('✓ New subscription created!');
+    log('Endpoint:', newSub.endpoint);
+    log('Validation:', validation);
+    
     return newSub;
     
   } catch (err) {
     // Handle InvalidStateError with aggressive retry
     if (err.name === 'InvalidStateError') {
-      logError('InvalidStateError encountered, attempting aggressive cleanup...');
+      logWarn('InvalidStateError encountered - attempting aggressive cleanup...');
       try {
         const sub = await self.registration.pushManager.getSubscription();
         if (sub) {
@@ -238,7 +312,7 @@ async function ensureSubscription() {
           userVisibleOnly: true,
           applicationServerKey: applicationServerKey
         });
-        log('Retry subscription successful:', retrySub.endpoint);
+        log('✓ Retry subscription successful:', retrySub.endpoint);
         return retrySub;
       } catch (retryErr) {
         logError('Retry subscription failed:', retryErr);
@@ -246,7 +320,7 @@ async function ensureSubscription() {
       }
     }
     
-    logError('Subscription error:', err);
+    logError('Subscription error:', err.name, err.message);
     return null;
   }
 }
@@ -255,6 +329,8 @@ async function ensureSubscription() {
 // BACKEND REGISTRATION
 // ============================================================================
 async function registerWithBackend(subscription) {
+  log('registerWithBackend() called');
+  
   if (!subscription || !SIGME_CONFIG.apiEndpoint) {
     logError('Cannot register: missing subscription or API endpoint');
     return false;
@@ -301,8 +377,15 @@ async function registerWithBackend(subscription) {
     os: os,
     platform: 'web',
     language: self.navigator?.language || 'en',
-    timezone: 'UTC' // SW doesn't have Intl access reliably
+    timezone: 'UTC'
   };
+
+  logDebug('Registration payload:', {
+    websiteId: payload.websiteId,
+    endpointPrefix: payload.subscription.endpoint.substring(0, 50) + '...',
+    browser: payload.browser,
+    os: payload.os
+  });
 
   try {
     const headers = {
@@ -314,7 +397,10 @@ async function registerWithBackend(subscription) {
       headers['Authorization'] = 'Bearer ' + SIGME_CONFIG.anonKey;
     }
 
-    const response = await fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
+    const url = SIGME_CONFIG.apiEndpoint + '/register-subscriber';
+    log('Registering with backend:', url);
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify(payload)
@@ -322,7 +408,8 @@ async function registerWithBackend(subscription) {
 
     if (response.ok) {
       const result = await response.json();
-      log('Backend registration successful:', result.subscriberId || result);
+      log('✓ Backend registration successful!');
+      log('Subscriber ID:', result.subscriberId || result);
       return true;
     } else {
       const errorText = await response.text();
@@ -339,7 +426,16 @@ async function registerWithBackend(subscription) {
 // TRACKING HELPER
 // ============================================================================
 async function trackEvent(eventType, notificationId, action) {
-  if (!SIGME_CONFIG.apiEndpoint || !notificationId) return;
+  if (!SIGME_CONFIG.apiEndpoint) {
+    logDebug('Tracking skipped - no API endpoint');
+    return;
+  }
+  if (!notificationId) {
+    logDebug('Tracking skipped - no notification ID');
+    return;
+  }
+  
+  logDebug('Tracking event:', eventType, 'notification:', notificationId, 'action:', action);
   
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -348,7 +444,7 @@ async function trackEvent(eventType, notificationId, action) {
       headers['Authorization'] = 'Bearer ' + SIGME_CONFIG.anonKey;
     }
     
-    await fetch(SIGME_CONFIG.apiEndpoint + '/track-notification', {
+    const response = await fetch(SIGME_CONFIG.apiEndpoint + '/track-notification', {
       method: 'POST',
       headers: headers,
       body: JSON.stringify({
@@ -358,7 +454,12 @@ async function trackEvent(eventType, notificationId, action) {
         action: action || 'default'
       })
     });
-    log('Tracked event:', eventType, 'for notification:', notificationId);
+    
+    if (response.ok) {
+      log('✓ Tracked:', eventType, 'for notification:', notificationId);
+    } else {
+      logWarn('Tracking response not ok:', response.status);
+    }
   } catch (err) {
     logError('Failed to track event:', err);
   }
@@ -370,25 +471,42 @@ async function trackEvent(eventType, notificationId, action) {
 
 // Install event - take control immediately
 self.addEventListener('install', (event) => {
-  log('Installing...');
+  log('========================================');
+  log('INSTALL EVENT');
+  log('========================================');
+  log('skipWaiting() called - new SW will activate immediately');
   self.skipWaiting();
 });
 
 // Activate event - claim clients and auto-subscribe
 self.addEventListener('activate', (event) => {
-  log('Activating...');
+  log('========================================');
+  log('ACTIVATE EVENT');
+  log('========================================');
+  
   event.waitUntil(
     self.clients.claim().then(async () => {
-      log('Claimed clients, checking subscription...');
+      log('✓ Clients claimed - SW now controls all pages');
       
       // Check notification permission
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        const subscription = await ensureSubscription();
-        if (subscription) {
-          await registerWithBackend(subscription);
+      if (typeof Notification !== 'undefined') {
+        log('Notification permission:', Notification.permission);
+        
+        if (Notification.permission === 'granted') {
+          log('Permission granted - ensuring subscription...');
+          const subscription = await ensureSubscription();
+          if (subscription) {
+            await registerWithBackend(subscription);
+          } else {
+            logWarn('Failed to create subscription during activate');
+          }
+        } else if (Notification.permission === 'denied') {
+          logWarn('Notifications are BLOCKED by user');
+        } else {
+          log('Notification permission not yet granted (default)');
         }
       } else {
-        log('Notification permission not granted, skipping auto-subscribe');
+        logWarn('Notification API not available');
       }
     })
   );
@@ -396,78 +514,155 @@ self.addEventListener('activate', (event) => {
 
 // Message handler for manual subscription trigger from page
 self.addEventListener('message', (event) => {
+  log('MESSAGE EVENT:', event.data?.type);
+  
   if (event.data?.type === 'SIGME_SUBSCRIBE') {
-    log('Received subscribe message from page');
+    log('Received SIGME_SUBSCRIBE message from page');
     event.waitUntil(
       ensureSubscription().then(async (sub) => {
         if (sub) {
-          await registerWithBackend(sub);
-          event.source?.postMessage({ type: 'SIGME_SUBSCRIBED', success: true });
+          const registered = await registerWithBackend(sub);
+          event.source?.postMessage({ 
+            type: 'SIGME_SUBSCRIBED', 
+            success: true,
+            registered: registered,
+            endpoint: sub.endpoint.substring(0, 50) + '...'
+          });
+          log('✓ Subscription complete, sent success response to page');
         } else {
           event.source?.postMessage({ type: 'SIGME_SUBSCRIBED', success: false });
+          logWarn('Subscription failed, sent failure response to page');
         }
       })
     );
   }
+  
+  if (event.data?.type === 'SIGME_DEBUG_STATUS') {
+    // Debug helper - report current status
+    self.registration.pushManager.getSubscription().then(sub => {
+      event.source?.postMessage({
+        type: 'SIGME_DEBUG_STATUS_RESPONSE',
+        hasSubscription: !!sub,
+        endpoint: sub?.endpoint?.substring(0, 50) + '...',
+        config: {
+          websiteId: SIGME_CONFIG.websiteId,
+          vapidKeyPrefix: SIGME_CONFIG.vapidPublicKey.substring(0, 20) + '...'
+        }
+      });
+    });
+  }
 });
 
-// Push event - display notification
+// ============================================================================
+// PUSH EVENT - THE CRITICAL PATH
+// This is where notifications are received from the server
+// ============================================================================
 self.addEventListener('push', (event) => {
-  log('Push received');
+  log('========================================');
+  log('🔔 PUSH EVENT RECEIVED');
+  log('========================================');
+  log('Timestamp:', new Date().toISOString());
+  log('Has data:', !!event.data);
   
   let data = {};
+  let rawPayload = null;
+  
   if (event.data) {
     try {
-      data = event.data.json();
+      rawPayload = event.data.text();
+      log('Raw payload (first 500 chars):', rawPayload.substring(0, 500));
+      data = JSON.parse(rawPayload);
+      log('Parsed payload:', {
+        title: data.title,
+        body: data.body?.substring(0, 100),
+        url: data.url,
+        notificationId: data.notificationId,
+        icon: data.icon,
+        image: data.image,
+        timestamp: data.timestamp
+      });
     } catch (e) {
-      data = { title: 'Notification', body: event.data.text() };
+      logWarn('Failed to parse payload as JSON:', e.message);
+      data = { title: 'Notification', body: rawPayload };
     }
+  } else {
+    logWarn('Push event has no data!');
+    data = { title: 'New Notification', body: 'You have a new notification' };
   }
   
+  const title = data.title || 'Notification';
   const options = {
     body: data.body || '',
     icon: data.icon || '/icon-192x192.png',
     image: data.image,
     badge: data.badge || '/badge-72x72.png',
-    vibrate: [100, 50, 100],
+    vibrate: [200, 100, 200],
     data: {
       url: data.url || '/',
-      notificationId: data.notificationId,
+      notificationId: data.notificationId || 'unknown-' + Date.now(),
       campaignId: data.campaignId,
-      websiteId: SIGME_CONFIG.websiteId
+      websiteId: SIGME_CONFIG.websiteId,
+      timestamp: Date.now()
     },
     actions: data.actions || [],
     requireInteraction: data.requireInteraction || false,
     tag: data.tag || 'sigme-' + Date.now(),
-    renotify: data.renotify || false
+    renotify: data.renotify !== false
   };
 
+  log('Showing notification:', title);
+  log('Options:', {
+    body: options.body?.substring(0, 50),
+    tag: options.tag,
+    notificationId: options.data.notificationId
+  });
+
   event.waitUntil(
-    self.registration.showNotification(data.title || 'Notification', options)
-      .then(() => trackEvent('delivered', data.notificationId))
+    self.registration.showNotification(title, options)
+      .then(() => {
+        log('✓ NOTIFICATION DISPLAYED SUCCESSFULLY');
+        log('Notification ID:', options.data.notificationId);
+        return trackEvent('delivered', options.data.notificationId);
+      })
+      .catch(err => {
+        logError('✗ FAILED TO SHOW NOTIFICATION:', err);
+      })
   );
 });
 
 // Notification click
 self.addEventListener('notificationclick', (event) => {
-  log('Notification clicked:', event.action || 'default');
+  log('========================================');
+  log('👆 NOTIFICATION CLICKED');
+  log('========================================');
+  log('Action:', event.action || 'default (body clicked)');
+  log('Notification tag:', event.notification.tag);
+  
   event.notification.close();
   
   const data = event.notification.data || {};
+  log('Notification data:', data);
   
   event.waitUntil(
     trackEvent('clicked', data.notificationId, event.action).then(() => {
       const urlToOpen = data.url || '/';
+      log('Opening URL:', urlToOpen);
+      
       return self.clients.matchAll({ type: 'window', includeUncontrolled: true })
         .then((clientList) => {
-          // Try to focus existing window
+          log('Found', clientList.length, 'open clients');
+          
+          // Try to focus existing window with matching URL
           for (const client of clientList) {
             if (client.url.includes(urlToOpen) && 'focus' in client) {
+              log('Focusing existing client:', client.url);
               return client.focus();
             }
           }
+          
           // Open new window
           if (self.clients.openWindow) {
+            log('Opening new window for:', urlToOpen);
             return self.clients.openWindow(urlToOpen);
           }
         });
@@ -475,13 +670,30 @@ self.addEventListener('notificationclick', (event) => {
   );
 });
 
-// Notification close (dismissed)
+// Notification close (dismissed without clicking)
 self.addEventListener('notificationclose', (event) => {
+  log('========================================');
+  log('❌ NOTIFICATION DISMISSED');
+  log('========================================');
+  log('Tag:', event.notification.tag);
+  
   const data = event.notification.data || {};
   event.waitUntil(trackEvent('dismissed', data.notificationId));
 });
 
-log('Service Worker script loaded and ready');
+// Error handler
+self.addEventListener('error', (event) => {
+  logError('Uncaught error in service worker:', event.error);
+});
+
+self.addEventListener('unhandledrejection', (event) => {
+  logError('Unhandled promise rejection:', event.reason);
+});
+
+log('========================================');
+log('SERVICE WORKER SCRIPT LOADED');
+log('Waiting for events...');
+log('========================================');
 `;
 
   // ============================================================================
