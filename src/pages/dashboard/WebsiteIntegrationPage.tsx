@@ -700,104 +700,164 @@ log('========================================');
   // MINIMAL INTEGRATION SCRIPT - Uses authorized Firebase VAPID key
   // Just registers SW with config params and requests permission
   // ============================================================================
-  const integrationScript = `<!-- Sigme Push Notifications -->
-<!-- VAPID Key: Authorized Firebase VAPID public key -->
-<!-- Add this before </body> on your website -->
+//   const integrationScript = `<!-- Sigme Push Notifications -->
+// <!-- VAPID Key: Authorized Firebase VAPID public key -->
+// <!-- Add this before </body> on your website -->
+// <script>
+// /**
+//  * Sigme Push Notifications - Minimal Integration
+//  * 
+//  * This script:
+//  * 1. Registers the service worker with config via query params
+//  * 2. Requests notification permission on load
+//  * 3. The SW handles EVERYTHING else automatically
+//  * 
+//  * VAPID Key Consistency:
+//  * Uses the authorized Firebase VAPID public key for all subscriptions.
+//  */
+// (function() {
+//   // Configuration - uses authorized Firebase VAPID key
+//   var config = {
+//     websiteId: '${website.id}',
+//     vapid: '${FIREBASE_VAPID_PUBLIC_KEY}',
+//     api: '${SUPABASE_URL}/functions/v1',
+//     key: '${SUPABASE_ANON_KEY}'
+//   };
+
+//   // Check browser support
+//   if (!('serviceWorker' in navigator)) {
+//     console.warn('[Sigme] Service workers not supported');
+//     return;
+//   }
+//   if (!('PushManager' in window)) {
+//     console.warn('[Sigme] Push notifications not supported');
+//     return;
+//   }
+
+//   // Build SW URL with config params
+//   var swUrl = '/sigme-sw.js?' +
+//     'websiteId=' + encodeURIComponent(config.websiteId) +
+//     '&vapid=' + encodeURIComponent(config.vapid) +
+//     '&api=' + encodeURIComponent(config.api) +
+//     '&key=' + encodeURIComponent(config.key);
+
+//   // Register service worker
+//   navigator.serviceWorker.register(swUrl, { scope: '/' })
+//     .then(function(reg) {
+//       console.log('[Sigme] Service Worker registered');
+//       return navigator.serviceWorker.ready;
+//     })
+//     .then(function(registration) {
+//       console.log('[Sigme] Service Worker ready');
+
+//       // Request permission and subscribe
+//       if (Notification.permission === 'granted') {
+//         console.log('[Sigme] Permission already granted, triggering subscription...');
+//         triggerSubscription(registration);
+//       } else if (Notification.permission !== 'denied') {
+//         console.log('[Sigme] Requesting notification permission...');
+//         Notification.requestPermission().then(function(permission) {
+//           if (permission === 'granted') {
+//             console.log('[Sigme] Permission granted!');
+//             triggerSubscription(registration);
+//           } else {
+//             console.log('[Sigme] Permission denied or dismissed:', permission);
+//           }
+//         });
+//       } else {
+//         console.log('[Sigme] Notifications are blocked by user');
+//       }
+//     })
+//     .catch(function(err) {
+//       console.error('[Sigme] Registration failed:', err);
+//     });
+
+//   // Tell the SW to subscribe
+//   function triggerSubscription(registration) {
+//     if (registration.active) {
+//       registration.active.postMessage({ type: 'SIGME_SUBSCRIBE' });
+//     } else {
+//       // Wait for SW to activate
+//       navigator.serviceWorker.addEventListener('controllerchange', function() {
+//         if (navigator.serviceWorker.controller) {
+//           navigator.serviceWorker.controller.postMessage({ type: 'SIGME_SUBSCRIBE' });
+//         }
+//       });
+//     }
+//   }
+
+//   // Listen for subscription result
+//   navigator.serviceWorker.addEventListener('message', function(event) {
+//     if (event.data?.type === 'SIGME_SUBSCRIBED') {
+//       if (event.data.success) {
+//         console.log('[Sigme] ✓ Successfully subscribed to push notifications!');
+//       } else {
+//         console.warn('[Sigme] Subscription failed - check SW logs for details');
+//       }
+//     }
+//   });
+// })();
+// </script>`;
+
+const integrationScript = `<!-- Sigme Push Notifications -->
 <script>
-/**
- * Sigme Push Notifications - Minimal Integration
- * 
- * This script:
- * 1. Registers the service worker with config via query params
- * 2. Requests notification permission on load
- * 3. The SW handles EVERYTHING else automatically
- * 
- * VAPID Key Consistency:
- * Uses the authorized Firebase VAPID public key for all subscriptions.
- */
-(function() {
-  // Configuration - uses authorized Firebase VAPID key
+(function () {
   var config = {
     websiteId: '${website.id}',
-    vapid: '${FIREBASE_VAPID_PUBLIC_KEY}',
-    api: '${SUPABASE_URL}/functions/v1',
-    key: '${SUPABASE_ANON_KEY}'
+    vapidPublicKey: '${FIREBASE_VAPID_PUBLIC_KEY}',
+    api: '${SUPABASE_URL}/functions/v1'
   };
 
-  // Check browser support
   if (!('serviceWorker' in navigator)) {
     console.warn('[Sigme] Service workers not supported');
     return;
   }
+
   if (!('PushManager' in window)) {
-    console.warn('[Sigme] Push notifications not supported');
+    console.warn('[Sigme] Push not supported');
     return;
   }
 
-  // Build SW URL with config params
-  var swUrl = '/sigme-sw.js?' +
-    'websiteId=' + encodeURIComponent(config.websiteId) +
-    '&vapid=' + encodeURIComponent(config.vapid) +
-    '&api=' + encodeURIComponent(config.api) +
-    '&key=' + encodeURIComponent(config.key);
-
-  // Register service worker
-  navigator.serviceWorker.register(swUrl, { scope: '/' })
-    .then(function(reg) {
-      console.log('[Sigme] Service Worker registered');
+  navigator.serviceWorker.register('/service-worker.js')
+    .then(function () {
       return navigator.serviceWorker.ready;
     })
-    .then(function(registration) {
-      console.log('[Sigme] Service Worker ready');
-
-      // Request permission and subscribe
+    .then(function (registration) {
       if (Notification.permission === 'granted') {
-        console.log('[Sigme] Permission already granted, triggering subscription...');
-        triggerSubscription(registration);
+        sendSubscribeMessage();
       } else if (Notification.permission !== 'denied') {
-        console.log('[Sigme] Requesting notification permission...');
-        Notification.requestPermission().then(function(permission) {
+        Notification.requestPermission().then(function (permission) {
           if (permission === 'granted') {
-            console.log('[Sigme] Permission granted!');
-            triggerSubscription(registration);
-          } else {
-            console.log('[Sigme] Permission denied or dismissed:', permission);
+            sendSubscribeMessage();
           }
         });
-      } else {
-        console.log('[Sigme] Notifications are blocked by user');
       }
     })
-    .catch(function(err) {
-      console.error('[Sigme] Registration failed:', err);
+    .catch(function (err) {
+      console.error('[Sigme] SW registration failed:', err);
     });
 
-  // Tell the SW to subscribe
-  function triggerSubscription(registration) {
-    if (registration.active) {
-      registration.active.postMessage({ type: 'SIGME_SUBSCRIBE' });
-    } else {
-      // Wait for SW to activate
-      navigator.serviceWorker.addEventListener('controllerchange', function() {
-        if (navigator.serviceWorker.controller) {
-          navigator.serviceWorker.controller.postMessage({ type: 'SIGME_SUBSCRIBE' });
-        }
+  function sendSubscribeMessage() {
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'SIGME_SUBSCRIBE',
+        payload: config
       });
     }
   }
 
-  // Listen for subscription result
-  navigator.serviceWorker.addEventListener('message', function(event) {
+  navigator.serviceWorker.addEventListener('message', function (event) {
     if (event.data?.type === 'SIGME_SUBSCRIBED') {
       if (event.data.success) {
-        console.log('[Sigme] ✓ Successfully subscribed to push notifications!');
+        console.log('[Sigme] Push subscription successful');
       } else {
-        console.warn('[Sigme] Subscription failed - check SW logs for details');
+        console.warn('[Sigme] Push subscription failed');
       }
     }
   });
 })();
 </script>`;
+
 
   return (
     <DashboardLayout>
