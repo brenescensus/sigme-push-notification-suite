@@ -1,8 +1,6 @@
 
 // lib/api.ts
-// const API_BASE_URL = 'https://sigme-backend-fkde.vercel.app/api';
-const API_BASE_URL = 'http://localhost:3000/api';
-
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 /**
  * Core fetch wrapper - uses cookies for auth (NO tokens)
  */
@@ -12,8 +10,7 @@ async function apiFetch<T = any>(
 ): Promise<T> {
   console.log(' API Debug - Endpoint:', endpoint);
   
-  const url = `${API_BASE_URL}/${endpoint}`;
-  
+  const url = `${API_BASE_URL}/api/${endpoint}`;
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     ...options.headers,
@@ -132,30 +129,13 @@ export const api = {
   },
 
   // Subscribers
-   // Add this to your existing api.ts file in the api object
-
-// Inside your api object, add the subscribers section:
-
 subscribers: {
   /**
    * Get all subscribers for a website
    */
-  getAll: async (websiteId: string) => {
+  async getAll(websiteId: string) {
     try {
-      const response = await fetch(`${API_BASE_URL}/subscribers?website_id=${websiteId}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await apiFetch(`subscribers?website_id=${websiteId}`);
       return {
         success: true,
         subscribers: data.subscribers || [],
@@ -173,22 +153,9 @@ subscribers: {
   /**
    * Get a single subscriber by ID
    */
-  getById: async (subscriberId: string) => {
+  async getById(subscriberId: string) {
     try {
-      const response = await fetch(`${API_BASE_URL}/subscribers/${subscriberId}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await apiFetch(`subscribers/${subscriberId}`);
       return {
         success: true,
         subscriber: data.subscriber,
@@ -206,22 +173,11 @@ subscribers: {
   /**
    * Delete a subscriber
    */
-  delete: async (subscriberId: string) => {
+  async delete(subscriberId: string) {
     try {
-      const response = await fetch(`${API_BASE_URL}/subscribers/${subscriberId}`, {
+      const data = await apiFetch(`subscribers/${subscriberId}`, {
         method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
       return {
         success: true,
         message: data.message || 'Subscriber deleted successfully',
@@ -238,29 +194,18 @@ subscribers: {
   /**
    * Send a test notification to a subscriber
    */
-  sendTest: async (subscriberId: string, notification: {
+  async sendTest(subscriberId: string, notification: {
     title: string;
     body: string;
     icon?: string;
     image?: string;
     url?: string;
-  }) => {
+  }) {
     try {
-      const response = await fetch(`${API_BASE_URL}/subscribers/${subscriberId}/test`, {
+      const data = await apiFetch(`subscribers/${subscriberId}/test`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
         body: JSON.stringify(notification),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
       return {
         success: true,
         message: data.message || 'Test notification sent successfully',
@@ -277,23 +222,12 @@ subscribers: {
   /**
    * Update subscriber status
    */
-  updateStatus: async (subscriberId: string, status: 'active' | 'inactive' | 'unsubscribed') => {
+  async updateStatus(subscriberId: string, status: 'active' | 'inactive' | 'unsubscribed') {
     try {
-      const response = await fetch(`${API_BASE_URL}/subscribers/${subscriberId}/status`, {
+      const data = await apiFetch(`subscribers/${subscriberId}/status`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
         body: JSON.stringify({ status }),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
       return {
         success: true,
         subscriber: data.subscriber,
@@ -310,22 +244,9 @@ subscribers: {
   /**
    * Get subscriber statistics for a website
    */
-  getStats: async (websiteId: string) => {
+  async getStats(websiteId: string) {
     try {
-      const response = await fetch(`${API_BASE_URL}/subscribers/stats?website_id=${websiteId}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await apiFetch(`subscribers/stats?website_id=${websiteId}`);
       return {
         success: true,
         stats: data.stats || {
@@ -350,22 +271,6 @@ subscribers: {
     }
   },
 },
-  // subscribers: {
-  //   async list(websiteId: string) {
-  //     return apiFetch(`subscribers?websiteId=${websiteId}`);
-  //   },
-
-  //   async get(subscriberId: string) {
-  //     return apiFetch(`subscribers/${subscriberId}`);
-  //   },
-
-  //   async delete(subscriberId: string) {
-  //     return apiFetch(`subscribers/${subscriberId}`, {
-  //       method: 'DELETE',
-  //     });
-  //   },
-  // },
-
   // Campaigns
   campaigns: {
     async create(campaignData: {

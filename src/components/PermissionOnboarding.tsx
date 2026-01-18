@@ -22,7 +22,7 @@ export function PermissionOnboarding({
       await registerServiceWorker(websiteId, apiUrl);
       
       // Show success notification
-      new Notification('Welcome! 🎉', {
+      new Notification('Welcome! ', {
         body: 'You\'ll now receive important updates',
         icon: '/icon-192.png',
       });

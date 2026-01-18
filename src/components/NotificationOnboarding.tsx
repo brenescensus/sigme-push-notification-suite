@@ -101,7 +101,7 @@ const NotificationOnboarding: React.FC<Props> = ({
 
       await saveSubscriptionToBackend(sub);
 
-      await reg.showNotification("Welcome to Sigme 🎉", {
+      await reg.showNotification("Welcome to Sigme ", {
         body: "Notifications are now enabled.",
         icon: "/icon-192.png",
         badge: "/badge-72.png",
@@ -121,8 +121,8 @@ const NotificationOnboarding: React.FC<Props> = ({
      SAVE SUBSCRIPTION TO BACKEND
   -----------------------------------*/
   const saveSubscriptionToBackend = async (sub: PushSubscription) => {
-// const res = await fetch("https://sigme-backend-fkde.vercel.app/api/subscribers/register", {
-const res = await fetch("http://localhost:3000/api/subscribers/register", {
+const res = await fetch("https://sigme-backend-fkde.vercel.app/api/subscribers/register", {
+// const res = await fetch("http://localhost:3000/api/subscribers/register", {
 
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -232,7 +232,7 @@ const res = await fetch("https://sigme-backend-fkde.vercel.app/api/notifications
 
   if (step === "complete") {
     return (
-      <Modal title="All Set 🎉" icon={<CheckCircle />}>
+      <Modal title="All Set " icon={<CheckCircle />}>
         <button onClick={onComplete} className="btn">
           Go to Dashboard <ArrowRight />
         </button>

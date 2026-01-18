@@ -189,11 +189,11 @@ self.addEventListener('push', (event) => {
     return;
   }
 
-  console.log('[Sigme SW] 📦 Notification payload:', notification);
-  console.log('[Sigme SW] 📝 Title:', notification.title);
-  console.log('[Sigme SW] 💬 Body:', notification.body);
-  console.log('[Sigme SW] 🖼️ Icon:', notification.icon);
-  console.log('[Sigme SW] 🔗 URL:', notification.url);
+  console.log('[Sigme SW] Notification payload:', notification);
+  console.log('[Sigme SW]  Title:', notification.title);
+  console.log('[Sigme SW]  Body:', notification.body);
+  console.log('[Sigme SW]  Icon:', notification.icon);
+  console.log('[Sigme SW]  URL:', notification.url);
 
   unreadCount++;
 
@@ -213,7 +213,7 @@ self.addEventListener('push', (event) => {
     actions: notification.actions || [],
   };
 
-  console.log('[Sigme SW] 🎨 Notification options:', options);
+  console.log('[Sigme SW]  Notification options:', options);
 
   event.waitUntil(
     Promise.all([
@@ -232,7 +232,7 @@ self.addEventListener('push', (event) => {
 // NOTIFICATION CLICK
 self.addEventListener('notificationclick', (event) => {
   console.log('========================================');
-  console.log('[Sigme SW] 🖱️ NOTIFICATION CLICKED');
+  console.log('[Sigme SW]  NOTIFICATION CLICKED');
   console.log('========================================');
   console.log('[Sigme SW] Notification:', event.notification);
   console.log('[Sigme SW] Action:', event.action);
@@ -241,7 +241,7 @@ self.addEventListener('notificationclick', (event) => {
   unreadCount = Math.max(0, unreadCount - 1);
 
   const url = event.notification.data?.url || '/';
-  console.log('[Sigme SW] 🔗 Opening URL:', url);
+  console.log('[Sigme SW]  Opening URL:', url);
 
   event.waitUntil(
     Promise.all([
@@ -273,7 +273,7 @@ self.addEventListener('notificationclick', (event) => {
 
 // NOTIFICATION CLOSE
 self.addEventListener('notificationclose', (event) => {
-  console.log('[Sigme SW] 🚫 Notification dismissed');
+  console.log('[Sigme SW]  Notification dismissed');
   unreadCount = Math.max(0, unreadCount - 1);
   event.waitUntil(clearBadge());
 });
@@ -343,5 +343,5 @@ async function clearBadge() {
   }
 }
 
-console.log(`[Sigme SW ${SW_VERSION}] 🚀 Loaded successfully`);
+console.log(`[Sigme SW ${SW_VERSION}]  Loaded successfully`);
 console.log(`[Sigme SW] VAPID Key: ${VAPID_PUBLIC_KEY.substring(0, 30)}...`);
