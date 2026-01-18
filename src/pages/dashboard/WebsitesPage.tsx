@@ -1,10 +1,5 @@
-/**
- * Websites Management Page
- * 
- * Lists all websites under the account with quick actions.
- * Allows managing, editing, and deleting websites.
- */
 
+// src/pages/dashboard/WebsitesPage.tsx
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -19,11 +14,11 @@ import {
   MoreHorizontal,
   CheckCircle,
   AlertCircle,
+  Pause,
 } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { useWebsite } from "@/contexts/WebsiteContext";
-import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,17 +42,19 @@ export default function WebsitesPage() {
   const { websites, deleteWebsite, setCurrentWebsite } = useWebsite();
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const handleDelete = (id: string) => {
-    deleteWebsite(id);
+  const handleDelete = async (id: string) => {
+    const success = await deleteWebsite(id);
+    if (success) {
+      toast({
+        title: "Website deleted",
+        description: "The website has been removed from your account.",
+      });
+    }
     setDeleteId(null);
-    toast({
-      title: "Website deleted",
-      description: "The website has been removed from your account.",
-    });
   };
 
-  const getStatusBadge = (status: string, isVerified: boolean) => {
-    if (status === "active" && isVerified) {
+  const getStatusBadge = (status: string) => {
+    if (status === "active") {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-success/10 text-success">
           <CheckCircle className="w-3 h-3" />
@@ -75,6 +72,7 @@ export default function WebsitesPage() {
     }
     return (
       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground">
+        <Pause className="w-3 h-3" />
         Inactive
       </span>
     );
@@ -94,6 +92,7 @@ export default function WebsitesPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
+            <h1 className="text-3xl font-bold text-foreground">Websites</h1>
             <p className="text-muted-foreground">
               Manage all your websites from one dashboard
             </p>
@@ -139,7 +138,7 @@ export default function WebsitesPage() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-3 flex-wrap">
                         <h3 className="text-lg font-semibold text-foreground">{website.name}</h3>
-                        {getStatusBadge(website.status, website.isVerified)}
+                        {getStatusBadge(website.status)}
                       </div>
                       <a
                         href={website.url}
@@ -147,25 +146,31 @@ export default function WebsitesPage() {
                         rel="noopener noreferrer"
                         className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 mt-1"
                       >
-                        {website.url}
-                        <ExternalLink className="w-3 h-3" />
+                        <span className="truncate">{website.url}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>
                       {website.description && (
-                        <p className="text-sm text-muted-foreground mt-1">{website.description}</p>
+                        <p className="text-sm text-muted-foreground mt-2 line-clamp-2">
+                          {website.description}
+                        </p>
                       )}
                     </div>
                   </div>
 
-                  {/* Stats */}
+                  {/* Stats - Using correct column names */}
                   <div className="flex items-center gap-6 text-sm">
                     <div className="flex items-center gap-2">
                       <Users className="w-4 h-4 text-muted-foreground" />
-                      <span className="font-medium">{website.subscriberCount.toLocaleString()}</span>
+                      <span className="font-medium">
+                        {(website.active_subscribers || 0).toLocaleString()}
+                      </span>
                       <span className="text-muted-foreground">subscribers</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Send className="w-4 h-4 text-muted-foreground" />
-                      <span className="font-medium">{website.notificationsSent.toLocaleString()}</span>
+                      <span className="font-medium">
+                        {(website.notifications_sent || 0).toLocaleString()}
+                      </span>
                       <span className="text-muted-foreground">sent</span>
                     </div>
                   </div>
@@ -178,9 +183,7 @@ export default function WebsitesPage() {
                       onClick={() => setCurrentWebsite(website)}
                       asChild
                     >
-                      <Link to="/dashboard">
-                        Select
-                      </Link>
+                      <Link to="/dashboard">Select</Link>
                     </Button>
                     <Button variant="outline" size="sm" asChild>
                       <Link to={`/dashboard/websites/${website.id}/integration`}>
@@ -190,14 +193,14 @@ export default function WebsitesPage() {
                     </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon-sm">
+                        <Button variant="ghost" size="sm">
                           <MoreHorizontal className="w-4 h-4" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem asChild>
-                          <Link to={`/dashboard/websites/${website.id}/settings`} className="flex items-center gap-2">
-                            <Settings className="w-4 h-4" />
+                          <Link to={`/dashboard/websites/${website.id}/settings`}>
+                            <Settings className="w-4 h-4 mr-2" />
                             Settings
                           </Link>
                         </DropdownMenuItem>
@@ -214,11 +217,11 @@ export default function WebsitesPage() {
                   </div>
                 </div>
 
-                {/* Footer */}
+                {/* Footer - Using correct column names */}
                 <div className="mt-4 pt-4 border-t border-border/50 flex items-center gap-4 text-xs text-muted-foreground">
-                  <span>Added {formatDate(website.createdAt)}</span>
+                  <span>Added {formatDate(website.created_at)}</span>
                   <span>•</span>
-                  <span>Updated {formatDate(website.updatedAt)}</span>
+                  <span>Updated {formatDate(website.updated_at)}</span>
                 </div>
               </div>
             ))}

@@ -801,7 +801,7 @@ export default function CampaignsPage() {
                           "px-2.5 py-1 rounded-full text-xs font-medium border",
                           getStatusColor(campaign.status)
                         )}>
-                          {campaign.status === "recurring" ? "🔄 Recurring" : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
+                          {campaign.status === "recurring" ? " Recurring" : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
                         </span>
                       </div>
                       <p className="text-sm text-muted-foreground truncate">{campaign.title}</p>

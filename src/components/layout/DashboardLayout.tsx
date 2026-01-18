@@ -1,3 +1,4 @@
+// src/components/layout/DashboardLayout.tsx
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -16,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { WebsiteSelector } from "@/components/dashboard/WebsiteSelector";
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 import { toast } from "sonner";
 import sigmeLogo from "@/assets/sigme-logo.png";
 
@@ -39,14 +40,30 @@ function Sidebar({ className, onLogout }: { className?: string; onLogout: () => 
   const [user, setUser] = useState<{ email?: string; name?: string } | null>(null);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        setUser({
-          email: user.email,
-          name: user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
-        });
+    //  Get user info from API using cookies
+    const loadUser = async () => {
+      try {
+        const data = await api.websites.list();
+        // setUser({
+        //  email: user.email,
+        //  name:user.email?.split('@')[0] || 'User',
+        // });
+        const userData = await api.auth.me();
+        if (userData && userData.user) {
+          setUser({
+            email: userData.user.email || 'user@example.com',
+            name: userData.user.user_metadata?.full_name ||
+              userData.user.email?.split('@')[0] ||
+              'User',
+          });
+        }
+      } catch (error) {
+        console.error('Failed to load user:', error);
+        // User will be redirected by ProtectedRoute
       }
-    });
+    };
+
+    loadUser();
   }, []);
 
   const initials = user?.name
@@ -95,9 +112,9 @@ function Sidebar({ className, onLogout }: { className?: string; onLogout: () => 
             <p className="text-sm font-medium text-sidebar-foreground truncate">{user?.name || 'User'}</p>
             <p className="text-xs text-muted-foreground truncate">{user?.email || ''}</p>
           </div>
-          <Button 
-            variant="ghost" 
-            size="icon-sm" 
+          <Button
+            variant="ghost"
+            size="icon-sm"
             className="text-muted-foreground hover:text-foreground"
             onClick={onLogout}
             title="Sign out"
@@ -113,19 +130,21 @@ function Sidebar({ className, onLogout }: { className?: string; onLogout: () => 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
-  
+
   // Get current page title
   const currentPage = navigation.find((item) => item.href === location.pathname);
   const pageTitle = currentPage?.name || "Dashboard";
 
   const handleLogout = async () => {
     try {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
+      //  Call logout API which clears cookies
+      await api.auth.logout();
       toast.success("Signed out successfully");
-      navigate("/auth");
+      navigate("/login");
     } catch (error: any) {
-      toast.error(error.message || "Failed to sign out");
+      console.error('Logout error:', error);
+      // Force navigate even on error
+      navigate("/login");
     }
   };
 

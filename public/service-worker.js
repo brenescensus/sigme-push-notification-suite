@@ -1,16 +1,10 @@
-/* ============================================================
-   SIGME SERVICE WORKER - PRODUCTION READY
-   Fixes: Payload parsing, error handling, VAPID consistency
-   ============================================================ */
-
-const SW_VERSION = '3.0.0';
-const VAPID_PUBLIC_KEY = 'BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I';
+//public/service-worker.js
+const SW_VERSION = '3.1.0';
+const VAPID_PUBLIC_KEY = 'BPB0HWKOKaG0V6xpWcnoaZvnJZCRl1OYfyUXFS7Do7OzJpW6WPoJQyd__u3KVDBDJlINatfLcmNwdF6kS5niPWI';
 
 let unreadCount = 0;
 
-// ============================================================
 // INSTALLATION
-// ============================================================
 self.addEventListener('install', (event) => {
   console.log(`[Sigme SW ${SW_VERSION}] Installing...`);
   self.skipWaiting();
@@ -26,9 +20,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// ============================================================
 // SUBSCRIPTION MANAGEMENT
-// ============================================================
 async function verifySubscription() {
   try {
     const subscription = await self.registration.pushManager.getSubscription();
@@ -41,20 +33,20 @@ async function verifySubscription() {
     // Verify VAPID key matches
     const subKey = arrayBufferToBase64(subscription.options.applicationServerKey);
     if (subKey !== VAPID_PUBLIC_KEY) {
-      console.error('[Sigme SW] VAPID key mismatch! Unsubscribing...');
+      console.error('[Sigme SW]  VAPID key mismatch! Unsubscribing...');
+      console.error('[Sigme SW] Expected:', VAPID_PUBLIC_KEY.substring(0, 30) + '...');
+      console.error('[Sigme SW] Got:', subKey.substring(0, 30) + '...');
       await subscription.unsubscribe();
-      console.log('[Sigme SW] Please refresh page to resubscribe');
+      console.log('[Sigme SW] Please refresh page to resubscribe with correct key');
     } else {
-      console.log('[Sigme SW] VAPID key verified ✓');
+      console.log('[Sigme SW]  VAPID key verified');
     }
   } catch (error) {
     console.error('[Sigme SW] Subscription verification error:', error);
   }
 }
 
-// ============================================================
 // MESSAGE HANDLING
-// ============================================================
 self.addEventListener('message', async (event) => {
   if (!event.data?.type) return;
 
@@ -78,33 +70,46 @@ async function handleSubscribe(event) {
     let subscription = await self.registration.pushManager.getSubscription();
     
     if (!subscription) {
+      console.log('[Sigme SW] Creating new subscription...');
       subscription = await self.registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
       });
+      console.log('[Sigme SW]  Subscription created');
     }
 
     // Register with backend
     const response = await fetch(`${apiUrl}/api/subscribers/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
       body: JSON.stringify({
         websiteId,
         subscription: subscription.toJSON(),
         platform: 'web',
         browser: getBrowserInfo(),
         os: getOSInfo(),
+        deviceType: getDeviceType(),
       }),
     });
 
-    if (!response.ok) throw new Error(`Registration failed: ${response.status}`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Registration failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('[Sigme SW] Registered with backend:', result);
 
     event.source?.postMessage({
       type: 'SIGME_SUBSCRIBE_SUCCESS',
       subscription: subscription.toJSON(),
+      result,
     });
   } catch (error) {
-    console.error('[Sigme SW] Subscribe error:', error);
+    console.error('[Sigme SW]  Subscribe error:', error);
     event.source?.postMessage({
       type: 'SIGME_SUBSCRIBE_ERROR',
       error: error.message,
@@ -117,6 +122,7 @@ async function handleUnsubscribe(event) {
     const subscription = await self.registration.pushManager.getSubscription();
     if (subscription) {
       await subscription.unsubscribe();
+      console.log('[Sigme SW] Unsubscribed');
     }
     event.source?.postMessage({ type: 'SIGME_UNSUBSCRIBE_SUCCESS' });
   } catch (error) {
@@ -130,17 +136,19 @@ async function handleGetStatus(event) {
     type: 'SIGME_STATUS',
     hasSubscription: !!subscription,
     version: SW_VERSION,
+    subscription: subscription ? subscription.toJSON() : null,
   });
 }
 
-// ============================================================
-// PUSH EVENT HANDLING - ROBUST PARSING
-// ============================================================
+// PUSH EVENT HANDLING - ENHANCED WITH BETTER LOGGING
 self.addEventListener('push', (event) => {
-  console.log('[Sigme SW] 🔔 Push event received');
+  console.log('========================================');
+  console.log('[Sigme SW]  PUSH EVENT RECEIVED');
+  console.log('========================================');
+  console.log('[Sigme SW] Timestamp:', new Date().toISOString());
   
   if (!event.data) {
-    console.log('[Sigme SW] No data in push event');
+    console.log('[Sigme SW]  No data in push event');
     return;
   }
 
@@ -150,17 +158,20 @@ self.addEventListener('push', (event) => {
   try {
     // Method 1: Direct JSON
     notification = event.data.json();
+    console.log('[Sigme SW]  Parsed using event.data.json()');
   } catch (e1) {
     try {
       // Method 2: Text then JSON
       const text = event.data.text();
       notification = JSON.parse(text);
+      console.log('[Sigme SW]  Parsed using event.data.text()');
     } catch (e2) {
       try {
         // Method 3: ArrayBuffer then JSON
         const buffer = event.data.arrayBuffer();
         const text = new TextDecoder().decode(buffer);
         notification = JSON.parse(text);
+        console.log('[Sigme SW]  Parsed using ArrayBuffer');
       } catch (e3) {
         // Method 4: Fallback to text display
         const fallbackText = event.data.text();
@@ -168,16 +179,21 @@ self.addEventListener('push', (event) => {
           title: 'Notification',
           body: fallbackText || 'You have a new notification',
         };
+        console.log('[Sigme SW]  Using fallback notification');
       }
     }
   }
 
   if (!notification) {
-    console.error('[Sigme SW] Failed to parse notification');
+    console.error('[Sigme SW]  Failed to parse notification');
     return;
   }
 
-  console.log('[Sigme SW] Parsed notification:', notification);
+  console.log('[Sigme SW] 📦 Notification payload:', notification);
+  console.log('[Sigme SW] 📝 Title:', notification.title);
+  console.log('[Sigme SW] 💬 Body:', notification.body);
+  console.log('[Sigme SW] 🖼️ Icon:', notification.icon);
+  console.log('[Sigme SW] 🔗 URL:', notification.url);
 
   unreadCount++;
 
@@ -188,6 +204,7 @@ self.addEventListener('push', (event) => {
     image: notification.image,
     tag: notification.tag || `notif-${Date.now()}`,
     requireInteraction: notification.requireInteraction || false,
+    vibrate: [200, 100, 200], // Vibration pattern for mobile
     data: {
       url: notification.url || '/',
       notificationId: notification.notificationId || notification.tag,
@@ -196,28 +213,35 @@ self.addEventListener('push', (event) => {
     actions: notification.actions || [],
   };
 
+  console.log('[Sigme SW] 🎨 Notification options:', options);
+
   event.waitUntil(
     Promise.all([
       self.registration.showNotification(notification.title || 'Notification', options),
       updateBadge(unreadCount),
     ]).then(() => {
-      console.log('[Sigme SW] ✓ Notification displayed');
+      console.log('[Sigme SW]  NOTIFICATION DISPLAYED SUCCESSFULLY');
+      console.log('========================================');
     }).catch((error) => {
-      console.error('[Sigme SW] Display error:', error);
+      console.error('[Sigme SW]  Display error:', error);
+      console.log('========================================');
     })
   );
 });
 
-// ============================================================
 // NOTIFICATION CLICK
-// ============================================================
 self.addEventListener('notificationclick', (event) => {
-  console.log('[Sigme SW] Notification clicked');
+  console.log('========================================');
+  console.log('[Sigme SW] 🖱️ NOTIFICATION CLICKED');
+  console.log('========================================');
+  console.log('[Sigme SW] Notification:', event.notification);
+  console.log('[Sigme SW] Action:', event.action);
   
   event.notification.close();
   unreadCount = Math.max(0, unreadCount - 1);
 
   const url = event.notification.data?.url || '/';
+  console.log('[Sigme SW] 🔗 Opening URL:', url);
 
   event.waitUntil(
     Promise.all([
@@ -227,30 +251,34 @@ self.addEventListener('notificationclick', (event) => {
           // Try to focus existing window
           for (const client of clientList) {
             if (client.url === url && 'focus' in client) {
+              console.log('[Sigme SW]  Focusing existing window');
               return client.focus();
             }
           }
           // Open new window
           if (self.clients.openWindow) {
+            console.log('[Sigme SW]  Opening new window');
             return self.clients.openWindow(url);
           }
         }),
-    ])
+    ]).then(() => {
+      console.log('[Sigme SW]  URL opened successfully');
+      console.log('========================================');
+    }).catch((error) => {
+      console.error('[Sigme SW]  Error opening URL:', error);
+      console.log('========================================');
+    })
   );
 });
 
-// ============================================================
 // NOTIFICATION CLOSE
-// ============================================================
 self.addEventListener('notificationclose', (event) => {
-  console.log('[Sigme SW] Notification dismissed');
+  console.log('[Sigme SW] 🚫 Notification dismissed');
   unreadCount = Math.max(0, unreadCount - 1);
   event.waitUntil(clearBadge());
 });
 
-// ============================================================
 // UTILITIES
-// ============================================================
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -290,6 +318,11 @@ function getOSInfo() {
   return 'Unknown';
 }
 
+function getDeviceType() {
+  const ua = navigator.userAgent;
+  return /Mobile|Android|iPhone/i.test(ua) ? 'mobile' : 'desktop';
+}
+
 async function updateBadge(count) {
   if ('setAppBadge' in navigator) {
     try {
@@ -310,4 +343,5 @@ async function clearBadge() {
   }
 }
 
-console.log(`[Sigme SW ${SW_VERSION}] Loaded successfully ✓`);
+console.log(`[Sigme SW ${SW_VERSION}] 🚀 Loaded successfully`);
+console.log(`[Sigme SW] VAPID Key: ${VAPID_PUBLIC_KEY.substring(0, 30)}...`);

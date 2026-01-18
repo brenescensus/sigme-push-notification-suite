@@ -1,49 +1,32 @@
-/**
- * New Website Registration Page
- * 
- * Step-by-step flow for adding a new website:
- * 1. Enter website details (name, URL, description)
- * 2. Confirm using the global Firebase VAPID key
- * 3. Show integration code and service worker
- * 
- * IMPORTANT: Uses a SINGLE authorized Firebase VAPID key pair for ALL websites.
- * This ensures cryptographic consistency across the entire push notification system.
- * 
- * AUTHORIZED VAPID KEY (from Firebase Cloud Messaging):
- * Public: BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I
- * Private: Stored in FIREBASE_VAPID_PRIVATE_KEY secret (backend only)
- */
+// src/pages/dashboard/NewWebsitePage.tsx
+// Backend-only version (NO Supabase)
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Globe, ArrowRight, Check, Key, Code, Download, Copy, AlertCircle } from "lucide-react";
+import { Globe, ArrowRight, Check, Code, Download, Copy, AlertCircle } from "lucide-react";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { useWebsite } from "@/contexts/WebsiteContext";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 
-/**
- * AUTHORIZED FIREBASE VAPID PUBLIC KEY
- * This is the SINGLE SOURCE OF TRUTH for all Web Push subscriptions.
- * DO NOT CHANGE unless you are rotating the Firebase VAPID keys.
- * The private key is stored in FIREBASE_VAPID_PRIVATE_KEY secret.
- */
-const FIREBASE_VAPID_PUBLIC_KEY = "BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I";
+const VAPID_PUBLIC_KEY = "BPB0HWKOKaG0V6xpWcnoaZvnJZCRl1OYfyUXFS7Do7OzJpW6WPoJQyd__u3KVDBDJlINatfLcmNwdF6kS5niPWI";
+// const BACKEND_URL = "https://sigme-backend-fkde.vercel.app";
+const BACKEND_URL = "http://localhost:3000";
 
-// Generate a unique website ID
-const generateWebsiteId = () => {
-  return `ws_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 9)}`;
-};
 
-// Generate API token
+
+const generateWebsiteId = () =>
+  `ws_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 9)}`;
+
 const generateApiToken = (websiteId: string) => {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const random = Array.from({ length: 24 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const random = Array.from({ length: 24 }, () => 
+    chars[Math.floor(Math.random() * chars.length)]
+  ).join("");
   return `sigme_${websiteId}_live_${random}`;
 };
 
@@ -53,6 +36,7 @@ interface GeneratedWebsite {
   id: string;
   name: string;
   url: string;
+  domain: string;
   description?: string;
   vapidPublicKey: string;
   apiToken: string;
@@ -60,82 +44,89 @@ interface GeneratedWebsite {
 
 export default function NewWebsitePage() {
   const navigate = useNavigate();
-  const { addWebsite } = useWebsite();
-  
+
   const [step, setStep] = useState<Step>(1);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
-  // Form data
+
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
-  
-  // Generated data
+
   const [generatedWebsite, setGeneratedWebsite] = useState<GeneratedWebsite | null>(null);
 
   const isStep1Valid = name.trim().length > 0 && url.trim().length > 0;
 
+  const extractDomain = (urlString: string): string => {
+    try {
+      const urlObj = new URL(urlString);
+      return urlObj.hostname;
+    } catch {
+      return urlString.replace(/^https?:\/\//, '').split('/')[0];
+    }
+  };
+
   const handleStep1Submit = async () => {
     if (!isStep1Valid) return;
-    
+
     setIsGenerating(true);
     setError(null);
-    
-    try {
-      // Get current session for auth
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        throw new Error("You must be logged in to create a website");
-      }
 
-      console.log('[NewWebsite] Using authorized Firebase VAPID public key');
-      console.log('[NewWebsite] Key prefix:', FIREBASE_VAPID_PUBLIC_KEY.substring(0, 20) + '...');
-      
+    try {
+          console.log(' Debug - Starting website creation...');
+// Debug 1: Check if user is authenticated
+    const token = localStorage.getItem('access_token');
+    console.log(' Debug - Token exists?', !!token);
+    console.log(' Debug - Token:', token ? token.substring(0, 20) + '...' : 'No token');
       const websiteId = generateWebsiteId();
       const apiToken = generateApiToken(websiteId);
-      const cleanUrl = url.trim().replace(/\/$/, ""); // Remove trailing slash
-      
-      // Insert website into database with the authorized Firebase VAPID key
-      // Note: We store a placeholder for private key since it's in secrets
-      const { error: insertError } = await supabase
-        .from('websites')
-        .insert({
-          id: websiteId,
-          name: name.trim(),
-          url: cleanUrl,
-          description: description.trim() || null,
-          vapid_public_key: FIREBASE_VAPID_PUBLIC_KEY,
-          vapid_private_key: 'STORED_IN_SECRETS', // Private key is in FIREBASE_VAPID_PRIVATE_KEY secret
-          api_token: apiToken,
-          user_id: session.user.id,
-          status: 'pending',
-          is_verified: false,
-        });
+      const cleanUrl = url.trim().replace(/\/$/, "");
+      const domain = extractDomain(cleanUrl);
 
-      if (insertError) {
-        console.error('[NewWebsite] Database insert error:', insertError);
-        throw new Error(`Failed to save website: ${insertError.message}`);
-      }
+      const trimmedDescription = description.trim();
       
+    const requestData = {
+      name: name.trim(),
+      domain:domain,
+      url: cleanUrl,
+      description: description.trim() || null
+    };
+
+    console.log(' Debug - Request data:', requestData);
+    const result = await api.websites.create(requestData);
+    console.log(' Debug - API Response:', result);
+
+      if (!result.success) {
+              console.error(' Debug - API Error:', result.error);
+
+        throw new Error(result.error || "Failed to create website");
+      }
+
       setGeneratedWebsite({
-        id: websiteId,
-        name: name.trim(),
-        url: cleanUrl,
-        description: description.trim() || undefined,
-        vapidPublicKey: FIREBASE_VAPID_PUBLIC_KEY,
+        id: result.website.id,
+        name: result.website.name,
+        url: result.website.url,
+        domain: result.website.domain,
+        description: result.website.description,
+        vapidPublicKey: VAPID_PUBLIC_KEY,
         apiToken: apiToken,
       });
-      
+
+      toast({
+        title: "Success",
+        description: "Website created successfully",
+      });
+
       setStep(2);
-      
     } catch (err: any) {
-      console.error('[NewWebsite] Error:', err);
-      setError(err.message || 'An unexpected error occurred');
+          console.error(' Debug - Catch error:', err);
+
+      console.error("Error creating website:", err);
+      setError(err.message || "Failed to create website");
       toast({
         title: "Error",
-        description: err.message || 'Failed to create website',
-        variant: "destructive",
+        description: err.message || "Failed to create website",
+        variant: "destructive"
       });
     } finally {
       setIsGenerating(false);
@@ -149,7 +140,7 @@ export default function NewWebsitePage() {
       title: "Website added successfully!",
       description: "You can now integrate Sigme on your website.",
     });
-    navigate(`/dashboard/websites/${generatedWebsite.id}/integration`);
+    navigate("/dashboard/websites");
   };
 
   const copyToClipboard = (text: string, label: string) => {
@@ -160,232 +151,37 @@ export default function NewWebsitePage() {
     });
   };
 
-  // Get the Supabase URL for API endpoints
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-
-  // ============================================================================
-  // SERVICE WORKER - Uses authorized Firebase VAPID key (passed via query params)
-  // The SW receives config via query params, handles all push logic.
-  // VAPID KEY CONSISTENCY: All websites use the same Firebase VAPID key.
-  // ============================================================================
   const serviceWorkerCode = generatedWebsite ? `/**
  * Sigme Push Notification Service Worker
  * Website: ${generatedWebsite.name}
  * Generated: ${new Date().toISOString()}
  * 
- * SINGLE SOURCE OF TRUTH for all push logic.
- * Config received via query params on registration.
- * 
- * VAPID KEY CONSISTENCY:
- * This service worker uses the authorized Firebase VAPID public key.
- * All subscriptions MUST use the same key for push to work.
+ *  Uses authorized VAPID key that matches backend
  */
 
-// Configuration (injected via query params)
+const SW_VERSION = '1.0.0';
+const VAPID_PUBLIC_KEY = '${VAPID_PUBLIC_KEY}';
+
 const SIGME_CONFIG = {
-  websiteId: '',
-  vapidPublicKey: '',
-  apiEndpoint: '',
-  anonKey: '',
+  websiteId: '${generatedWebsite.id}',
+  apiEndpoint: '${BACKEND_URL}',
   debug: true
 };
-
-// Parse config from SW URL query params
-const swUrl = new URL(self.location.href);
-SIGME_CONFIG.websiteId = swUrl.searchParams.get('websiteId') || '';
-SIGME_CONFIG.vapidPublicKey = swUrl.searchParams.get('vapid') || '';
-SIGME_CONFIG.apiEndpoint = swUrl.searchParams.get('api') || '';
-SIGME_CONFIG.anonKey = swUrl.searchParams.get('key') || '';
 
 function log(...args) {
   if (SIGME_CONFIG.debug) console.log('[Sigme SW]', ...args);
 }
 
-function logError(...args) {
-  console.error('[Sigme SW Error]', ...args);
-}
-
-log('Service Worker loaded with config:', {
-  websiteId: SIGME_CONFIG.websiteId,
-  vapidKeyPrefix: SIGME_CONFIG.vapidPublicKey.substring(0, 20) + '...',
-  apiEndpoint: SIGME_CONFIG.apiEndpoint
-});
-
 // VAPID key utilities
 function urlBase64ToUint8Array(base64String) {
-  try {
-    const padding = '='.repeat((4 - base64String.length % 4) % 4);
-    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-    const rawData = atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) {
-      outputArray[i] = rawData.charCodeAt(i);
-    }
-    return outputArray;
-  } catch (e) {
-    logError('Failed to decode VAPID key:', e);
-    return null;
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
   }
-}
-
-function uint8ArrayToUrlBase64(uint8Array) {
-  let binary = '';
-  for (let i = 0; i < uint8Array.length; i++) {
-    binary += String.fromCharCode(uint8Array[i]);
-  }
-  return btoa(binary).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
-}
-
-// Subscription management with conflict resolution
-async function ensureSubscription() {
-  if (!SIGME_CONFIG.websiteId || !SIGME_CONFIG.vapidPublicKey) {
-    logError('Missing websiteId or vapidPublicKey');
-    return null;
-  }
-
-  if (!SIGME_CONFIG.vapidPublicKey.startsWith('B')) {
-    logError('Invalid VAPID public key - must start with B');
-    return null;
-  }
-
-  const applicationServerKey = urlBase64ToUint8Array(SIGME_CONFIG.vapidPublicKey);
-  if (!applicationServerKey || applicationServerKey.length !== 65) {
-    logError('Invalid VAPID key length:', applicationServerKey?.length);
-    return null;
-  }
-
-  try {
-    let existingSub = await self.registration.pushManager.getSubscription();
-    
-    if (existingSub) {
-      const existingKey = existingSub.options?.applicationServerKey;
-      if (existingKey) {
-        const existingKeyBase64 = uint8ArrayToUrlBase64(new Uint8Array(existingKey));
-        if (existingKeyBase64 === SIGME_CONFIG.vapidPublicKey) {
-          log('Existing subscription matches, reusing');
-          return existingSub;
-        }
-        log('VAPID key mismatch, unsubscribing...');
-      }
-      
-      try {
-        await existingSub.unsubscribe();
-        log('Unsubscribed old subscription');
-      } catch (e) {
-        logError('Unsubscribe failed:', e);
-      }
-    }
-    
-    log('Creating new subscription...');
-    const newSub = await self.registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: applicationServerKey
-    });
-    
-    log('Subscription created:', newSub.endpoint);
-    return newSub;
-    
-  } catch (err) {
-    if (err.name === 'InvalidStateError') {
-      logError('InvalidStateError, aggressive cleanup...');
-      try {
-        const sub = await self.registration.pushManager.getSubscription();
-        if (sub) await sub.unsubscribe();
-        return await self.registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: applicationServerKey
-        });
-      } catch (e) {
-        logError('Retry failed:', e);
-      }
-    }
-    logError('Subscription error:', err);
-    return null;
-  }
-}
-
-// Backend registration
-async function registerWithBackend(subscription) {
-  if (!subscription || !SIGME_CONFIG.apiEndpoint) return false;
-
-  const subJson = subscription.toJSON();
-  if (!subJson.keys?.p256dh || !subJson.keys?.auth) {
-    logError('Missing subscription keys');
-    return false;
-  }
-
-  const ua = self.navigator?.userAgent || '';
-  let browser = 'Unknown', browserVersion = '', deviceType = 'desktop', os = 'Unknown';
-  
-  if (ua.includes('Firefox')) { browser = 'Firefox'; browserVersion = (ua.match(/Firefox\\/(\\d+)/) || [])[1] || ''; }
-  else if (ua.includes('Edg')) { browser = 'Edge'; browserVersion = (ua.match(/Edg\\/(\\d+)/) || [])[1] || ''; }
-  else if (ua.includes('Chrome')) { browser = 'Chrome'; browserVersion = (ua.match(/Chrome\\/(\\d+)/) || [])[1] || ''; }
-  else if (ua.includes('Safari') && !ua.includes('Chrome')) { browser = 'Safari'; }
-  
-  if (ua.includes('Windows')) os = 'Windows';
-  else if (ua.includes('Mac OS')) os = 'macOS';
-  else if (ua.includes('Linux') && !ua.includes('Android')) os = 'Linux';
-  else if (ua.includes('Android')) os = 'Android';
-  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
-  
-  if (/Mobi|Android|iPhone/.test(ua)) deviceType = 'mobile';
-  else if (/Tablet|iPad/.test(ua)) deviceType = 'tablet';
-
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (SIGME_CONFIG.anonKey) {
-      headers['apikey'] = SIGME_CONFIG.anonKey;
-      headers['Authorization'] = 'Bearer ' + SIGME_CONFIG.anonKey;
-    }
-
-    const response = await fetch(SIGME_CONFIG.apiEndpoint + '/register-subscriber', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        websiteId: SIGME_CONFIG.websiteId,
-        subscription: { endpoint: subJson.endpoint, keys: subJson.keys },
-        userAgent: ua,
-        browser, browserVersion, deviceType, os,
-        platform: 'web',
-        language: self.navigator?.language || 'en',
-        timezone: 'UTC'
-      })
-    });
-
-    if (response.ok) {
-      const result = await response.json();
-      log('Registered:', result.subscriberId);
-      return true;
-    }
-    logError('Registration failed:', response.status);
-    return false;
-  } catch (err) {
-    logError('Registration error:', err);
-    return false;
-  }
-}
-
-// Tracking helper
-async function trackEvent(eventType, notificationId, action) {
-  if (!SIGME_CONFIG.apiEndpoint || !notificationId) return;
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (SIGME_CONFIG.anonKey) {
-      headers['apikey'] = SIGME_CONFIG.anonKey;
-      headers['Authorization'] = 'Bearer ' + SIGME_CONFIG.anonKey;
-    }
-    await fetch(SIGME_CONFIG.apiEndpoint + '/track-notification', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        websiteId: SIGME_CONFIG.websiteId,
-        notificationId,
-        event: eventType,
-        action: action || 'default'
-      })
-    });
-  } catch (e) { /* ignore */ }
+  return outputArray;
 }
 
 // Install
@@ -397,47 +193,105 @@ self.addEventListener('install', () => {
 // Activate
 self.addEventListener('activate', (event) => {
   log('Activating...');
-  event.waitUntil(
-    self.clients.claim().then(async () => {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        const sub = await ensureSubscription();
-        if (sub) await registerWithBackend(sub);
-      }
-    })
-  );
+  event.waitUntil(self.clients.claim());
 });
+
+// Subscribe to push
+async function subscribeToPush() {
+  try {
+    const applicationServerKey = urlBase64ToUint8Array(VAPID_PUBLIC_KEY);
+    
+    const subscription = await self.registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: applicationServerKey
+    });
+    
+    log('Subscription created');
+    
+    // Register with backend
+    const response = await fetch(\`\${SIGME_CONFIG.apiEndpoint}/api/subscribers/register\`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        websiteId: SIGME_CONFIG.websiteId,
+        subscription: subscription.toJSON(),
+        platform: 'web',
+        browser: getBrowserInfo(),
+        os: getOSInfo(),
+      })
+    });
+
+    if (response.ok) {
+      const result = await response.json();
+      log('Registered with backend:', result);
+      return true;
+    }
+    
+    return false;
+  } catch (err) {
+    log('Subscribe error:', err);
+    return false;
+  }
+}
+
+function getBrowserInfo() {
+  const ua = navigator.userAgent;
+  if (ua.includes('Chrome')) return 'Chrome';
+  if (ua.includes('Firefox')) return 'Firefox';
+  if (ua.includes('Safari')) return 'Safari';
+  if (ua.includes('Edge')) return 'Edge';
+  return 'Unknown';
+}
+
+function getOSInfo() {
+  const ua = navigator.userAgent;
+  if (ua.includes('Windows')) return 'Windows';
+  if (ua.includes('Mac')) return 'macOS';
+  if (ua.includes('Linux')) return 'Linux';
+  if (ua.includes('Android')) return 'Android';
+  if (ua.includes('iOS')) return 'iOS';
+  return 'Unknown';
+}
 
 // Message handler
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'SIGME_SUBSCRIBE') {
     event.waitUntil(
-      ensureSubscription().then(async (sub) => {
-        if (sub) {
-          await registerWithBackend(sub);
-          event.source?.postMessage({ type: 'SIGME_SUBSCRIBED', success: true });
-        } else {
-          event.source?.postMessage({ type: 'SIGME_SUBSCRIBED', success: false });
-        }
+      subscribeToPush().then(success => {
+        event.source?.postMessage({ 
+          type: 'SIGME_SUBSCRIBED', 
+          success 
+        });
       })
     );
   }
 });
 
-// Push
+// Push event
 self.addEventListener('push', (event) => {
   log('Push received');
+  
   let data = {};
   if (event.data) {
-    try { data = event.data.json(); } catch (e) { data = { title: 'Notification', body: event.data.text() }; }
+    try {
+      data = event.data.json();
+    } catch (e) {
+      data = { 
+        title: 'Notification', 
+        body: event.data.text() 
+      };
+    }
   }
   
   const options = {
     body: data.body || '',
-    icon: data.icon || '/icon-192x192.png',
+    icon: data.icon || '/icon-192.png',
+    badge: data.badge || '/badge-72.png',
     image: data.image,
-    badge: data.badge || '/badge-72x72.png',
-    vibrate: [100, 50, 100],
-    data: { url: data.url || '/', notificationId: data.notificationId, websiteId: SIGME_CONFIG.websiteId },
+    data: { 
+      url: data.url || '/', 
+      notificationId: data.notificationId 
+    },
     actions: data.actions || [],
     requireInteraction: data.requireInteraction || false,
     tag: data.tag || 'sigme-' + Date.now()
@@ -445,47 +299,38 @@ self.addEventListener('push', (event) => {
 
   event.waitUntil(
     self.registration.showNotification(data.title || 'Notification', options)
-      .then(() => trackEvent('delivered', data.notificationId))
   );
 });
 
-// Click
+// Notification click
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const data = event.notification.data || {};
+  const url = event.notification.data?.url || '/';
+  
   event.waitUntil(
-    trackEvent('clicked', data.notificationId, event.action).then(() => {
-      const urlToOpen = data.url || '/';
-      return self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-        .then((clients) => {
-          for (const client of clients) {
-            if (client.url.includes(urlToOpen) && 'focus' in client) return client.focus();
-          }
-          if (self.clients.openWindow) return self.clients.openWindow(urlToOpen);
-        });
+    self.clients.matchAll({ type: 'window' }).then(clients => {
+      for (const client of clients) {
+        if (client.url === url && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(url);
+      }
     })
   );
-});
-
-// Close
-self.addEventListener('notificationclose', (event) => {
-  const data = event.notification.data || {};
-  event.waitUntil(trackEvent('dismissed', data.notificationId));
 });
 
 log('Service Worker ready');
 ` : "";
 
-  // Minimal integration script - uses the authorized Firebase VAPID key
   const integrationScript = generatedWebsite ? `<!-- Sigme Push Notifications -->
-<!-- VAPID Key: Authorized Firebase VAPID public key -->
 <script>
 (function() {
   var config = {
     websiteId: '${generatedWebsite.id}',
-    vapid: '${FIREBASE_VAPID_PUBLIC_KEY}',
-    api: '${supabaseUrl}/functions/v1',
-    key: '${supabaseAnonKey}'
+    vapid: '${VAPID_PUBLIC_KEY}',
+    api: '${BACKEND_URL}'
   };
 
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -493,29 +338,28 @@ log('Service Worker ready');
     return;
   }
 
-  var swUrl = '/sigme-sw.js?' +
-    'websiteId=' + encodeURIComponent(config.websiteId) +
-    '&vapid=' + encodeURIComponent(config.vapid) +
-    '&api=' + encodeURIComponent(config.api) +
-    '&key=' + encodeURIComponent(config.key);
-
-  navigator.serviceWorker.register(swUrl, { scope: '/' })
+  navigator.serviceWorker.register('/sigme-sw.js', { scope: '/' })
     .then(function() { return navigator.serviceWorker.ready; })
     .then(function(reg) {
       console.log('[Sigme] SW ready');
+      
       if (Notification.permission === 'granted') {
         reg.active?.postMessage({ type: 'SIGME_SUBSCRIBE' });
       } else if (Notification.permission !== 'denied') {
         Notification.requestPermission().then(function(p) {
-          if (p === 'granted') reg.active?.postMessage({ type: 'SIGME_SUBSCRIBE' });
+          if (p === 'granted') {
+            reg.active?.postMessage({ type: 'SIGME_SUBSCRIBE' });
+          }
         });
       }
     })
-    .catch(function(e) { console.error('[Sigme] Error:', e); });
+    .catch(function(e) { 
+      console.error('[Sigme] Error:', e); 
+    });
 
   navigator.serviceWorker.addEventListener('message', function(e) {
     if (e.data?.type === 'SIGME_SUBSCRIBED') {
-      console.log('[Sigme] ' + (e.data.success ? '✓ Subscribed!' : 'Subscription failed'));
+      console.log('[Sigme]', e.data.success ? '✓ Subscribed!' : 'Subscription failed');
     }
   });
 })();
@@ -542,7 +386,7 @@ log('Service Worker ready');
                 "hidden sm:block text-sm font-medium",
                 step >= s ? "text-foreground" : "text-muted-foreground"
               )}>
-                {s === 1 ? "Website Details" : s === 2 ? "Configuration" : "Integration"}
+                {s === 1 ? "Details" : s === 2 ? "Config" : "Integration"}
               </span>
               {s < 3 && (
                 <ArrowRight className="w-4 h-4 text-muted-foreground mx-2" />
@@ -559,7 +403,7 @@ log('Service Worker ready');
                 <Globe className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <h2 className="text-xl font-semibold text-foreground">Add New Website</h2>
+                <h2 className="text-xl font-semibold">Add New Website</h2>
                 <p className="text-sm text-muted-foreground">Enter your website details</p>
               </div>
             </div>
@@ -583,9 +427,6 @@ log('Service Worker ready');
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                 />
-                <p className="text-xs text-muted-foreground">
-                  A friendly name to identify this website in your dashboard
-                </p>
               </div>
 
               <div className="space-y-2">
@@ -596,16 +437,13 @@ log('Service Worker ready');
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                 />
-                <p className="text-xs text-muted-foreground">
-                  The full URL of your website including https://
-                </p>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="description">Description (optional)</Label>
                 <Textarea
                   id="description"
-                  placeholder="Brief description of your website..."
+                  placeholder="Brief description..."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={3}
@@ -617,28 +455,20 @@ log('Service Worker ready');
                 disabled={!isStep1Valid || isGenerating}
                 className="w-full"
               >
-                {isGenerating ? (
-                  <>Creating Website...</>
-                ) : (
-                  <>
-                    Create Website
-                    <ArrowRight className="w-4 h-4 ml-2" />
-                  </>
-                )}
+                {isGenerating ? "Creating..." : "Create Website"}
+                <ArrowRight className="w-4 h-4 ml-2" />
               </Button>
             </div>
           </div>
         )}
 
-        {/* Step 2: Configuration Ready */}
+        {/* Step 2: Configuration */}
         {step === 2 && generatedWebsite && (
-          <div className="p-8 rounded-2xl bg-card border border-border/50">
+          <div className="p-8 rounded-2xl bg-card border">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 rounded-xl bg-success/10 flex items-center justify-center">
-                <Check className="w-6 h-6 text-success" />
-              </div>
+              <Check className="w-12 h-12 text-success" />
               <div>
-                <h2 className="text-xl font-semibold text-foreground">Website Created!</h2>
+                <h2 className="text-xl font-semibold">Website Created!</h2>
                 <p className="text-sm text-muted-foreground">Ready for push notifications</p>
               </div>
             </div>
@@ -647,7 +477,7 @@ log('Service Worker ready');
               <div className="p-4 rounded-lg bg-muted/50">
                 <Label className="text-xs text-muted-foreground">Website ID</Label>
                 <div className="flex items-center gap-2 mt-1">
-                  <code className="text-sm font-mono flex-1 break-all">{generatedWebsite.id}</code>
+                  <code className="text-sm font-mono flex-1">{generatedWebsite.id}</code>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -659,20 +489,17 @@ log('Service Worker ready');
               </div>
 
               <div className="p-4 rounded-lg bg-muted/50">
-                <Label className="text-xs text-muted-foreground">Public VAPID Key (Firebase)</Label>
+                <Label className="text-xs text-muted-foreground">VAPID Public Key</Label>
                 <div className="flex items-center gap-2 mt-1">
-                  <code className="text-xs font-mono flex-1 break-all">{FIREBASE_VAPID_PUBLIC_KEY}</code>
+                  <code className="text-xs font-mono flex-1 break-all">{VAPID_PUBLIC_KEY}</code>
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => copyToClipboard(FIREBASE_VAPID_PUBLIC_KEY, "Public Key")}
+                    onClick={() => copyToClipboard(VAPID_PUBLIC_KEY, "VAPID Key")}
                   >
                     <Copy className="w-4 h-4" />
                   </Button>
                 </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  This is the authorized Firebase VAPID key used for all push subscriptions
-                </p>
               </div>
             </div>
 
@@ -683,17 +510,16 @@ log('Service Worker ready');
           </div>
         )}
 
-        {/* Step 3: Integration */}
+        {/* Step 3: Integration Code */}
         {step === 3 && generatedWebsite && (
           <div className="space-y-6">
-            {/* Service Worker */}
-            <div className="p-6 rounded-xl bg-card border border-border/50">
+            <div className="p-6 rounded-xl bg-card border">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <Code className="w-5 h-5 text-primary" />
                   <div>
                     <h3 className="font-semibold">Service Worker</h3>
-                    <p className="text-sm text-muted-foreground">Save as sigme-sw.js in root folder</p>
+                    <p className="text-sm text-muted-foreground">Save as sigme-sw.js</p>
                   </div>
                 </div>
                 <div className="flex gap-2">
@@ -707,7 +533,6 @@ log('Service Worker ready');
                       a.href = url;
                       a.download = "sigme-sw.js";
                       a.click();
-                      URL.revokeObjectURL(url);
                     }}
                   >
                     <Download className="w-4 h-4 mr-2" />
@@ -728,14 +553,13 @@ log('Service Worker ready');
               </pre>
             </div>
 
-            {/* Integration Script */}
-            <div className="p-6 rounded-xl bg-card border border-border/50">
+            <div className="p-6 rounded-xl bg-card border">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <Code className="w-5 h-5 text-primary" />
                   <div>
                     <h3 className="font-semibold">Integration Script</h3>
-                    <p className="text-sm text-muted-foreground">Add before &lt;/body&gt; on every page</p>
+                    <p className="text-sm text-muted-foreground">Add before &lt;/body&gt;</p>
                   </div>
                 </div>
                 <Button

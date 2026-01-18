@@ -69,7 +69,9 @@ export function WebsiteSelector() {
               </span>
               <span className="text-xs text-muted-foreground flex items-center gap-1.5">
                 <span className={cn("w-1.5 h-1.5 rounded-full", getStatusColor(currentWebsite.status))} />
-                {currentWebsite.subscriberCount.toLocaleString()} subscribers
+                {/* {currentWebsite.subscriber_count.toLocaleString()} subscribers */}
+                {(currentWebsite?.active_subscribers ?? 0).toLocaleString()} subscribers
+
               </span>
             </div>
           </div>
@@ -84,7 +86,7 @@ export function WebsiteSelector() {
           </span>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        
+
         {websites.map((website) => (
           <DropdownMenuItem
             key={website.id}
@@ -118,20 +120,25 @@ export function WebsiteSelector() {
               </div>
             </div>
             <span className="text-xs text-muted-foreground shrink-0">
-              {website.subscriberCount.toLocaleString()}
+              {/* // Right before line 72, add this:
+console.log(' [WebsiteSelector] currentWebsite:', currentWebsite);
+console.log('[WebsiteSelector] subscriber_count:', currentWebsite?.subscriber_count); */}
+              {/* {currentWebsite.subscriber_count.toLocaleString()} */}
+              {(currentWebsite?.active_subscribers ?? 0).toLocaleString()} subscribers
+
             </span>
           </DropdownMenuItem>
         ))}
-        
+
         <DropdownMenuSeparator />
-        
+
         <DropdownMenuItem asChild>
           <Link to="/dashboard/websites/new" className="flex items-center gap-2 cursor-pointer">
             <Plus className="w-4 h-4" />
             <span>Add New Website</span>
           </Link>
         </DropdownMenuItem>
-        
+
         <DropdownMenuItem asChild>
           <Link to="/dashboard/websites" className="flex items-center gap-2 cursor-pointer">
             <Settings className="w-4 h-4" />

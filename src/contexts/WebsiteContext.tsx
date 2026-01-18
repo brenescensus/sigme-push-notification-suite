@@ -1,30 +1,22 @@
-/**
- * Website Context (Production Version)
- * 
- * Manages website data from the database.
- * Provides CRUD operations for multi-website management.
- */
-
+// src/contexts/WebsiteContext.tsx
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { api } from "@/lib/api";
 import { toast } from "@/hooks/use-toast";
 
-// Type matching database schema
 export interface Website {
   id: string;
+  user_id: string;
   name: string;
   url: string;
-  description?: string;
-  createdAt: string;
-  updatedAt: string;
-  subscriberCount: number;
-  notificationsSent: number;
-  vapidPublicKey: string;
-  vapidPrivateKey: string;
-  apiToken: string;
-  status: "active" | "pending" | "inactive";
-  isVerified: boolean;
-  userId: string;
+  domain: string | null;
+  description: string | null;
+  vapid_public_key: string | null;
+  vapid_private_key: string | null;
+  notifications_sent: number | null;
+  active_subscribers: number | null;
+  status: "active" | "paused" | "deleted";
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 interface WebsiteContextType {
@@ -32,7 +24,7 @@ interface WebsiteContextType {
   currentWebsite: Website | null;
   isLoading: boolean;
   setCurrentWebsite: (website: Website | null) => void;
-  addWebsite: (website: Omit<Website, "userId">) => Promise<Website | null>;
+  addWebsite: (data: { name: string; url: string; description?: string }) => Promise<Website | null>;
   updateWebsite: (id: string, updates: Partial<Website>) => Promise<boolean>;
   deleteWebsite: (id: string) => Promise<boolean>;
   refreshWebsites: () => Promise<void>;
@@ -40,129 +32,87 @@ interface WebsiteContextType {
 
 const WebsiteContext = createContext<WebsiteContextType | undefined>(undefined);
 
-// Convert database row to Website type
-function dbToWebsite(row: any): Website {
-  return {
-    id: row.id,
-    name: row.name,
-    url: row.url,
-    description: row.description,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    subscriberCount: row.subscriber_count,
-    notificationsSent: row.notifications_sent,
-    vapidPublicKey: row.vapid_public_key,
-    vapidPrivateKey: row.vapid_private_key,
-    apiToken: row.api_token,
-    status: row.status as "active" | "pending" | "inactive",
-    isVerified: row.is_verified,
-    userId: row.user_id,
-  };
-}
-
 export function WebsiteProvider({ children }: { children: ReactNode }) {
   const [websites, setWebsites] = useState<Website[]>([]);
   const [currentWebsite, setCurrentWebsite] = useState<Website | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
 
-  // Fetch websites from database
+  // Fetch websites from backend (uses cookies for auth)
   const refreshWebsites = async () => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      setIsLoading(true);
+      console.log('[WebsiteContext] Fetching websites...');
       
-      if (!session?.user) {
-        setWebsites([]);
-        setCurrentWebsite(null);
-        setIsLoading(false);
-        return;
+      const data = await api.websites.list();
+      
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to fetch websites');
       }
 
-      const { data, error } = await supabase
-        .from("websites")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        console.error("Error fetching websites:", error);
-        toast({
-          title: "Error",
-          description: "Failed to load websites",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      const websiteList = (data || []).map(dbToWebsite);
+      const websiteList = data.websites || [];
+      console.log('[WebsiteContext] Loaded websites:', websiteList.length);
       setWebsites(websiteList);
 
       // Set current website if not set or if current is deleted
       if (websiteList.length > 0) {
-        if (!currentWebsite || !websiteList.find(w => w.id === currentWebsite.id)) {
+        if (!currentWebsite || !websiteList.find((w: Website) => w.id === currentWebsite.id)) {
           // Try to restore from localStorage
           const savedWebsiteId = localStorage.getItem("sigme_current_website");
           const savedWebsite = savedWebsiteId 
-            ? websiteList.find(w => w.id === savedWebsiteId) 
+            ? websiteList.find((w: Website) => w.id === savedWebsiteId) 
             : null;
           setCurrentWebsite(savedWebsite || websiteList[0]);
         }
       } else {
         setCurrentWebsite(null);
       }
-    } catch (error) {
-      console.error("Error in refreshWebsites:", error);
-    } finally {
+      
       setIsLoading(false);
+    } catch (error: any) {
+      console.error('[WebsiteContext] Error fetching websites:', error);
+      
+      setWebsites([]);
+      setCurrentWebsite(null);
+      setIsLoading(false);
+      
+      // Re-throw error so ProtectedRoute can catch it and redirect to login
+      throw error;
     }
   };
 
   // Add new website
-  const addWebsite = async (website: Omit<Website, "userId">): Promise<Website | null> => {
+  const addWebsite = async (data: { 
+    name: string; 
+    url: string;
+    description?: string;
+  }): Promise<Website | null> => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      console.log('[WebsiteContext] Creating website:', data);
+      const result = await api.websites.create(data);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to create website');
+      }
+
+      const newWebsite = result.website;
+      console.log('[WebsiteContext] Website created:', newWebsite.id);
       
-      if (!session?.user) {
-        toast({
-          title: "Error",
-          description: "You must be logged in to add a website",
-          variant: "destructive",
-        });
-        return null;
-      }
-
-      const { data, error } = await supabase
-        .from("websites")
-        .insert({
-          id: website.id,
-          user_id: session.user.id,
-          name: website.name,
-          url: website.url,
-          description: website.description,
-          vapid_public_key: website.vapidPublicKey,
-          vapid_private_key: website.vapidPrivateKey,
-          api_token: website.apiToken,
-          status: website.status,
-          is_verified: website.isVerified,
-        })
-        .select()
-        .single();
-
-      if (error) {
-        console.error("Error adding website:", error);
-        toast({
-          title: "Error",
-          description: error.message || "Failed to add website",
-          variant: "destructive",
-        });
-        return null;
-      }
-
-      const newWebsite = dbToWebsite(data);
       setWebsites(prev => [newWebsite, ...prev]);
       setCurrentWebsite(newWebsite);
+
+      toast({
+        title: "Success",
+        description: "Website added successfully",
+      });
       
       return newWebsite;
-    } catch (error) {
-      console.error("Error in addWebsite:", error);
+    } catch (error: any) {
+      console.error('[WebsiteContext] Error adding website:', error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to add website",
+        variant: "destructive",
+      });
       return null;
     }
   };
@@ -170,60 +120,45 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
   // Update website
   const updateWebsite = async (id: string, updates: Partial<Website>): Promise<boolean> => {
     try {
-      const dbUpdates: any = {};
-      if (updates.name !== undefined) dbUpdates.name = updates.name;
-      if (updates.url !== undefined) dbUpdates.url = updates.url;
-      if (updates.description !== undefined) dbUpdates.description = updates.description;
-      if (updates.status !== undefined) dbUpdates.status = updates.status;
-      if (updates.isVerified !== undefined) dbUpdates.is_verified = updates.isVerified;
+      const result = await api.websites.update(id, updates);
 
-      const { error } = await supabase
-        .from("websites")
-        .update(dbUpdates)
-        .eq("id", id);
-
-      if (error) {
-        console.error("Error updating website:", error);
-        toast({
-          title: "Error",
-          description: "Failed to update website",
-          variant: "destructive",
-        });
-        return false;
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update website');
       }
 
       // Update local state
       setWebsites(prev =>
-        prev.map(w => (w.id === id ? { ...w, ...updates, updatedAt: new Date().toISOString() } : w))
+        prev.map(w => (w.id === id ? { ...w, ...updates, updated_at: new Date().toISOString() } : w))
       );
       
       if (currentWebsite?.id === id) {
         setCurrentWebsite(prev => prev ? { ...prev, ...updates } : null);
       }
 
+      toast({
+        title: "Success",
+        description: "Website updated successfully",
+      });
+
       return true;
-    } catch (error) {
-      console.error("Error in updateWebsite:", error);
+    } catch (error: any) {
+      console.error('[WebsiteContext] Error updating website:', error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to update website",
+        variant: "destructive",
+      });
       return false;
     }
   };
 
-  // Delete website
+  // Delete website (soft delete by setting status to 'deleted')
   const deleteWebsite = async (id: string): Promise<boolean> => {
     try {
-      const { error } = await supabase
-        .from("websites")
-        .delete()
-        .eq("id", id);
+      const result = await api.websites.delete(id);
 
-      if (error) {
-        console.error("Error deleting website:", error);
-        toast({
-          title: "Error",
-          description: "Failed to delete website",
-          variant: "destructive",
-        });
-        return false;
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to delete website');
       }
 
       const newWebsites = websites.filter(w => w.id !== id);
@@ -233,9 +168,19 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
         setCurrentWebsite(newWebsites[0] || null);
       }
 
+      toast({
+        title: "Success",
+        description: "Website deleted successfully",
+      });
+
       return true;
-    } catch (error) {
-      console.error("Error in deleteWebsite:", error);
+    } catch (error: any) {
+      console.error('[WebsiteContext] Error deleting website:', error);
+      toast({
+        title: "Error",
+        description: error.message || "Failed to delete website",
+        variant: "destructive",
+      });
       return false;
     }
   };
@@ -247,15 +192,9 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
     }
   }, [currentWebsite]);
 
-  // Initial load and auth state listener
+  // Don't fetch on mount - let ProtectedRoute call refreshWebsites
   useEffect(() => {
-    refreshWebsites();
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
-      refreshWebsites();
-    });
-
-    return () => subscription.unsubscribe();
+    console.log('[WebsiteContext] Initialized (waiting for explicit refresh)');
   }, []);
 
   return (

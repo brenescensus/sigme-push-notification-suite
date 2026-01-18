@@ -1,3 +1,4 @@
+//frontend\src\components\NotificationOnboarding.tsx
 import React, { useEffect, useState } from "react";
 import {
   Bell,
@@ -24,8 +25,8 @@ interface Props {
   skipable?: boolean;
 }
 
-const VAPID_PUBLIC_KEY =
-  "BBZmIZboXmmfocyHA7FQor98z0DSyWWHoO1Se5nVBULGB_DKaymJZJ3YYW76DiqI_0mIHZNWE9Szm2SnCvQuO2I";
+
+const VAPID_PUBLIC_KEY = "BPB0HWKOKaG0V6xpWcnoaZvnJZCRl1OYfyUXFS7Do7OzJpW6WPoJQyd__u3KVDBDJlINatfLcmNwdF6kS5niPWI";
 
 const NotificationOnboarding: React.FC<Props> = ({
   websiteId,
@@ -120,7 +121,9 @@ const NotificationOnboarding: React.FC<Props> = ({
      SAVE SUBSCRIPTION TO BACKEND
   -----------------------------------*/
   const saveSubscriptionToBackend = async (sub: PushSubscription) => {
-    const res = await fetch("https://sigme-push-notification-suite.supabase.co/functions/v1/register-subscriber", {
+// const res = await fetch("https://sigme-backend-fkde.vercel.app/api/subscribers/register", {
+const res = await fetch("http://localhost:3000/api/subscribers/register", {
+
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -134,6 +137,26 @@ const NotificationOnboarding: React.FC<Props> = ({
     }
   };
 
+  // Add these helper functions
+function getBrowserInfo() {
+  const ua = navigator.userAgent;
+  if (ua.includes('Chrome')) return 'Chrome';
+  if (ua.includes('Firefox')) return 'Firefox';
+  if (ua.includes('Safari')) return 'Safari';
+  if (ua.includes('Edge')) return 'Edge';
+  return 'Unknown';
+}
+
+function getOSInfo() {
+  const ua = navigator.userAgent;
+  if (ua.includes('Windows')) return 'Windows';
+  if (ua.includes('Mac')) return 'macOS';
+  if (ua.includes('Linux')) return 'Linux';
+  if (ua.includes('Android')) return 'Android';
+  if (ua.includes('iOS')) return 'iOS';
+  return 'Unknown';
+}
+
   /* ----------------------------------
      REAL TEST NOTIFICATION
   -----------------------------------*/
@@ -142,7 +165,7 @@ const NotificationOnboarding: React.FC<Props> = ({
     setStep("testing");
 
     try {
-      const res = await fetch("/api/push/test", {
+const res = await fetch("https://sigme-backend-fkde.vercel.app/api/notifications/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ websiteId }),
@@ -239,22 +262,6 @@ function urlBase64ToUint8Array(base64String: string) {
   return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
 }
 
-/* ----------------------------------
-   SIMPLE MODAL WRAPPER
------------------------------------*/
-// const Modal: React.FC<{ title: string; icon: React.ReactNode }> = ({
-//   title,
-//   icon,
-//   children,
-// }) => (
-//   <div className="fixed inset-0 bg-black/50 flex items-center justify-center">
-//     <div className="bg-white p-8 rounded-xl max-w-md w-full text-center">
-//       <div className="mx-auto mb-4">{icon}</div>
-//       <h2 className="text-xl font-bold mb-4">{title}</h2>
-//       {children}
-//     </div>
-//   </div>
-// );
 interface ModalProps {
   title: string;
   icon: React.ReactNode;
