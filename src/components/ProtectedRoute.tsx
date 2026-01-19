@@ -1,57 +1,31 @@
-//Component that handles protected routes
-import { useEffect, useState } from "react";
-import { Navigate, useLocation } from "react-router-dom";
-import { useWebsite } from "@/contexts/WebsiteContext";
-import { Loader2 } from "lucide-react";
+// src/components/ProtectedRoute.tsx
+// Token-based authentication check 
+import { Navigate, useLocation } from 'react-router-dom';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
 }
 
 export default function ProtectedRoute({ children }: ProtectedRouteProps) {
-  const [isChecking, setIsChecking] = useState(true);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const { refreshWebsites, isLoading: websitesLoading } = useWebsite();
   const location = useLocation();
-
-  useEffect(() => {
-    checkAuth();
-  }, []);
-
-  const checkAuth = async () => {
-    try {
-      console.log(' [ProtectedRoute] Checking authentication...');
-      
-      // Try to refresh websites - if it succeeds, user is authenticated
-      await refreshWebsites();
-      
-      setIsAuthenticated(true);
-    } catch (error) {
-      console.error(' [ProtectedRoute] Authentication failed:', error);
-      setIsAuthenticated(false);
-    } finally {
-      setIsChecking(false);
-    }
-  };
-
-  // Show loading while checking auth or while websites are loading
-  if (isChecking || websitesLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center space-y-4">
-          <Loader2 className="w-12 h-12 animate-spin mx-auto text-primary" />
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    );
-  }
+  
+  // Simple synchronous check
+  const token = localStorage.getItem('access_token');
+  const isAuthenticated = !!token;
+  
+  console.log('[ProtectedRoute] Auth check:', {
+    path: location.pathname,
+    hasToken: isAuthenticated,
+    tokenPreview: token ? token.substring(0, 20) + '...' : 'None'
+  });
 
   // Redirect to login if not authenticated
   if (!isAuthenticated) {
-    console.log(' [ProtectedRoute] Redirecting to login');
-    return <Navigate to="/login" replace state={{ from: location }} />;
+    // console.log('[ProtectedRoute]  Not authenticated, redirecting to login');
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Show protected content if authenticated
+  // Render children if authenticated
+  // console.log('[ProtectedRoute]  Authenticated, rendering protected content');
   return <>{children}</>;
 }

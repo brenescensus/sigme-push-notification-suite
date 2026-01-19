@@ -120,10 +120,7 @@ export function WebsiteSelector() {
               </div>
             </div>
             <span className="text-xs text-muted-foreground shrink-0">
-              {/* // Right before line 72, add this:
-console.log(' [WebsiteSelector] currentWebsite:', currentWebsite);
-console.log('[WebsiteSelector] subscriber_count:', currentWebsite?.subscriber_count); */}
-              {/* {currentWebsite.subscriber_count.toLocaleString()} */}
+
               {(currentWebsite?.active_subscribers ?? 0).toLocaleString()} subscribers
 
             </span>

@@ -166,6 +166,8 @@ function getOSInfo() {
 
     try {
 const res = await fetch("https://sigme-backend-fkde.vercel.app/api/notifications/send", {
+  // const res = await fetch("https://localhost:3000/api/notifications/send", {
+
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ websiteId }),

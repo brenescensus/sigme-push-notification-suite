@@ -1,4 +1,3 @@
-
 // src/pages/dashboard/WebsitesPage.tsx
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -144,8 +143,8 @@ export default function WebsitesPage() {
                         href={website.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 mt-1"
-                      >
+                        className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 mt-1">
+                      
                         <span className="truncate">{website.url}</span>
                         <ExternalLink className="w-3 h-3 shrink-0" />
                       </a>

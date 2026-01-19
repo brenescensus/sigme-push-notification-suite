@@ -1,6 +1,4 @@
 // src/pages/dashboard/NewWebsitePage.tsx
-// Backend-only version (NO Supabase)
-
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Globe, ArrowRight, Check, Code, Download, Copy, AlertCircle } from "lucide-react";
@@ -14,9 +12,8 @@ import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 
 const VAPID_PUBLIC_KEY = "BPB0HWKOKaG0V6xpWcnoaZvnJZCRl1OYfyUXFS7Do7OzJpW6WPoJQyd__u3KVDBDJlINatfLcmNwdF6kS5niPWI";
-// const BACKEND_URL = "https://sigme-backend-fkde.vercel.app";
-const BACKEND_URL = "http://localhost:3000";
-
+// const BACKEND_URL = "http://localhost:3000";
+const BACKEND_URL = "https://sigme-backend-fkde.vercel.app";
 
 
 const generateWebsiteId = () =>
@@ -73,32 +70,48 @@ export default function NewWebsitePage() {
     setError(null);
 
     try {
-          console.log(' Debug - Starting website creation...');
-// Debug 1: Check if user is authenticated
-    const token = localStorage.getItem('access_token');
-    console.log(' Debug - Token exists?', !!token);
-    console.log(' Debug - Token:', token ? token.substring(0, 20) + '...' : 'No token');
+      // console.log(' Debug - Starting website creation...');
+      
+      //  Check if token exists BEFORE making request
+      const token = localStorage.getItem('access_token');
+      // console.log(' Debug - Token exists?', !!token);
+      // console.log(' Debug - Token length:', token?.length);
+      // console.log(' Debug - Token preview:', token?.substring(0, 100) + '...');
+      // console.log(' Debug - Token type:', typeof token);
+      
+      // Verify localStorage is working
+      // console.log(' Debug - All localStorage keys:', Object.keys(localStorage));
+      // console.log(' Debug - localStorage.user exists?', !!localStorage.getItem('user'));
+      
+      if (!token) {
+        throw new Error('No authentication token found. Please log in again.');
+      }
+      
+      // Check if token looks valid (JWT format)
+      const parts = token.split('.');
+      // console.log(' Debug - Token parts (should be 3):', parts.length);
+      if (parts.length !== 3) {
+        throw new Error('Invalid token format. Please log in again.');
+      }
+
       const websiteId = generateWebsiteId();
       const apiToken = generateApiToken(websiteId);
       const cleanUrl = url.trim().replace(/\/$/, "");
       const domain = extractDomain(cleanUrl);
-
-      const trimmedDescription = description.trim();
       
-    const requestData = {
-      name: name.trim(),
-      domain:domain,
-      url: cleanUrl,
-      description: description.trim() || null
-    };
+      const requestData = {
+        name: name.trim(),
+        domain: domain,
+        url: cleanUrl,
+        description: description.trim() || null
+      };
 
-    console.log(' Debug - Request data:', requestData);
-    const result = await api.websites.create(requestData);
-    console.log(' Debug - API Response:', result);
+      // console.log(' Debug - Request data:', requestData);
+      const result = await api.websites.create(requestData);
+      // console.log(' Debug - API Response:', result);
 
       if (!result.success) {
-              console.error(' Debug - API Error:', result.error);
-
+        console.error(' Debug - API Error:', result.error);
         throw new Error(result.error || "Failed to create website");
       }
 
@@ -119,15 +132,30 @@ export default function NewWebsitePage() {
 
       setStep(2);
     } catch (err: any) {
-          console.error(' Debug - Catch error:', err);
-
-      console.error("Error creating website:", err);
-      setError(err.message || "Failed to create website");
-      toast({
-        title: "Error",
-        description: err.message || "Failed to create website",
-        variant: "destructive"
-      });
+      console.error('💥 Debug - Catch error:', err);
+      
+      // Handle authentication errors
+      if (err.message.includes('401') || err.message.includes('Unauthorized') || err.message.includes('authenticated')) {
+        setError('Session expired. Please log in again.');
+        toast({
+          title: "Authentication Error",
+          description: "Your session has expired. Please log in again.",
+          variant: "destructive"
+        });
+        
+        // Redirect to login after a delay
+        setTimeout(() => {
+          localStorage.removeItem('access_token');
+          navigate('/login');
+        }, 2000);
+      } else {
+        setError(err.message || "Failed to create website");
+        toast({
+          title: "Error",
+          description: err.message || "Failed to create website",
+          variant: "destructive"
+        });
+      }
     } finally {
       setIsGenerating(false);
     }

@@ -1,9 +1,9 @@
-// src/App.tsx
+// src/App.tsx 
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { WebsiteProvider } from "./contexts/WebsiteContext";
 import { useEffect } from "react";
 
@@ -29,13 +29,13 @@ import ProtectedRoute from "./components/ProtectedRoute";
 const queryClient = new QueryClient();
 
 const App = () => {
-    //  Service Worker Registration
+  // Service Worker Registration
   useEffect(() => {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
         .register("/service-worker.js")
         .then((registration) => {
-          console.log("Service Worker registered:", registration);
+          // console.log("Service Worker registered:", registration);
         })
         .catch((error) => {
           console.error("Service Worker registration failed:", error);
@@ -45,18 +45,19 @@ const App = () => {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <WebsiteProvider>
-        <TooltipProvider>
-          <Toaster />
-          <Sonner />
-          <BrowserRouter>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
+        <BrowserRouter>
+          {/*  Move WebsiteProvider INSIDE BrowserRouter */}
+          <WebsiteProvider>
             <Routes>
-              {/*  PUBLIC ROUTES  */}
+              {/* PUBLIC ROUTES */}
               <Route path="/" element={<LandingPage />} />
               <Route path="/login" element={<AuthPage />} />
-              <Route path="/auth" element={<AuthPage />} /> {/* Legacy route */}
+              <Route path="/auth" element={<AuthPage />} />
 
-              {/*  PROTECTED ROUTES */}
+              {/* PROTECTED ROUTES */}
               <Route 
                 path="/dashboard" 
                 element={
@@ -130,12 +131,12 @@ const App = () => {
                 } 
               />
 
-              {/*  404  */}
+              {/* 404 */}
               <Route path="*" element={<NotFound />} />
             </Routes>
-          </BrowserRouter>
-        </TooltipProvider>
-      </WebsiteProvider>
+          </WebsiteProvider>
+        </BrowserRouter>
+      </TooltipProvider>
     </QueryClientProvider>
   );
 };

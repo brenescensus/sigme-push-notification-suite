@@ -575,7 +575,7 @@ export default function SubscribersPage() {
 
     try {
       setIsLoading(true);
-      console.log('📥 Loading subscribers for website:', currentWebsite.id, currentWebsite.name);
+      // console.log(' Loading subscribers for website:', currentWebsite.id, currentWebsite.name);
       
       const result = await api.subscribers.getAll(currentWebsite.id);
       
@@ -585,7 +585,7 @@ export default function SubscribersPage() {
           sub => sub.website_id === currentWebsite.id
         );
         
-        console.log(`Loaded ${filteredSubs.length} subscribers for ${currentWebsite.name}`);
+        // console.log(`Loaded ${filteredSubs.length} subscribers for ${currentWebsite.name}`);
         setSubscribers(filteredSubs);
       } else {
         throw new Error(result.error || 'Failed to load subscribers');

@@ -1,30 +1,30 @@
-// src/contexts/WebsiteContext.tsx
+// src/contexts/WebsiteContext.tsx - FIXED VERSION
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
 import { api } from "@/lib/api";
 import { toast } from "@/hooks/use-toast";
+import { useLocation } from "react-router-dom";
 
 export interface Website {
   id: string;
-  user_id: string;
   name: string;
   url: string;
-  domain: string | null;
-  description: string | null;
-  vapid_public_key: string | null;
-  vapid_private_key: string | null;
-  notifications_sent: number | null;
-  active_subscribers: number | null;
-  status: "active" | "paused" | "deleted";
-  created_at: string | null;
-  updated_at: string | null;
+  domain: string;
+  description?: string;
+  created_at: string;
+  updated_at: string;
+  active_subscribers?: number;
+  notifications_sent?: number;
+  status: "active" | "pending" | "inactive";
+  user_id: string;
 }
 
 interface WebsiteContextType {
   websites: Website[];
   currentWebsite: Website | null;
   isLoading: boolean;
+  error: string | null;
   setCurrentWebsite: (website: Website | null) => void;
-  addWebsite: (data: { name: string; url: string; description?: string }) => Promise<Website | null>;
+  addWebsite: (data: { name: string; url: string; domain: string; description?: string }) => Promise<Website | null>;
   updateWebsite: (id: string, updates: Partial<Website>) => Promise<boolean>;
   deleteWebsite: (id: string) => Promise<boolean>;
   refreshWebsites: () => Promise<void>;
@@ -35,71 +35,104 @@ const WebsiteContext = createContext<WebsiteContextType | undefined>(undefined);
 export function WebsiteProvider({ children }: { children: ReactNode }) {
   const [websites, setWebsites] = useState<Website[]>([]);
   const [currentWebsite, setCurrentWebsite] = useState<Website | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const location = useLocation();
 
-  // Fetch websites from backend (uses cookies for auth)
   const refreshWebsites = async () => {
+    //  Don't fetch if we're on public pages
+    if (location.pathname.includes('/login') || location.pathname.includes('/auth') || location.pathname === '/') {
+      // console.log(' [WebsiteContext] Skipping fetch - on public page');
+      setIsLoading(false);
+      return;
+    }
+
+    //  Check if token exists before making request
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      // console.log(' [WebsiteContext] Skipping fetch - no token');
+      setIsLoading(false);
+      return;
+    }
+
     try {
       setIsLoading(true);
-      console.log('[WebsiteContext] Fetching websites...');
+      setError(null);
+      
+      // console.log(' [WebsiteContext] Starting to fetch websites...');
+      // console.log(' [WebsiteContext] Token exists:', !!token);
+      // console.log(' [WebsiteContext] Current path:', location.pathname);
       
       const data = await api.websites.list();
       
-      if (!data.success) {
+      // console.log(' [WebsiteContext] Raw API response:', data);
+      
+      //  Handle multiple response formats
+      let websiteList: Website[] = [];
+      
+      if (data.success === true && Array.isArray(data.websites)) {
+        websiteList = data.websites;
+      } else if (data.success === false) {
         throw new Error(data.error || 'Failed to fetch websites');
+      } else if (Array.isArray(data)) {
+        websiteList = data;
+      } else {
+        console.error(' [WebsiteContext] Unexpected response format:', data);
+        throw new Error('Unexpected response format from server');
       }
-
-      const websiteList = data.websites || [];
-      console.log('[WebsiteContext] Loaded websites:', websiteList.length);
+      
+      // console.log(` [WebsiteContext] Loaded ${websiteList.length} websites`);
       setWebsites(websiteList);
 
-      // Set current website if not set or if current is deleted
+      // Set current website
       if (websiteList.length > 0) {
         if (!currentWebsite || !websiteList.find((w: Website) => w.id === currentWebsite.id)) {
-          // Try to restore from localStorage
-          const savedWebsiteId = localStorage.getItem("sigme_current_website");
-          const savedWebsite = savedWebsiteId 
-            ? websiteList.find((w: Website) => w.id === savedWebsiteId) 
-            : null;
-          setCurrentWebsite(savedWebsite || websiteList[0]);
+          // console.log(' [WebsiteContext] Setting current website to:', websiteList[0].name);
+          setCurrentWebsite(websiteList[0]);
         }
       } else {
+        // console.log(' [WebsiteContext] No websites found');
         setCurrentWebsite(null);
       }
       
-      setIsLoading(false);
     } catch (error: any) {
-      console.error('[WebsiteContext] Error fetching websites:', error);
+      console.error(' [WebsiteContext] Error fetching websites:', error);
+      console.error(' [WebsiteContext] Error message:', error.message);
       
       setWebsites([]);
       setCurrentWebsite(null);
-      setIsLoading(false);
+      setError(error.message || 'Failed to load websites');
       
-      // Re-throw error so ProtectedRoute can catch it and redirect to login
-      throw error;
+      //  DON'T re-throw the error - just log it
+      // This prevents redirect loops
+      
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // Add new website
   const addWebsite = async (data: { 
     name: string; 
-    url: string;
+    url: string; 
+    domain: string;
     description?: string;
   }): Promise<Website | null> => {
     try {
-      console.log('[WebsiteContext] Creating website:', data);
+      // console.log(' [WebsiteContext] Creating website:', data);
       const result = await api.websites.create(data);
-
+      
+      // console.log(' [WebsiteContext] Create result:', result);
+      
       if (!result.success) {
         throw new Error(result.error || 'Failed to create website');
       }
 
       const newWebsite = result.website;
-      console.log('[WebsiteContext] Website created:', newWebsite.id);
+      // console.log(' [WebsiteContext] Website created:', newWebsite.id);
       
       setWebsites(prev => [newWebsite, ...prev]);
       setCurrentWebsite(newWebsite);
-
+      
       toast({
         title: "Success",
         description: "Website added successfully",
@@ -107,7 +140,7 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
       
       return newWebsite;
     } catch (error: any) {
-      console.error('[WebsiteContext] Error adding website:', error);
+      console.error(' [WebsiteContext] Error adding website:', error);
       toast({
         title: "Error",
         description: error.message || "Failed to add website",
@@ -117,16 +150,24 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Update website
   const updateWebsite = async (id: string, updates: Partial<Website>): Promise<boolean> => {
     try {
-      const result = await api.websites.update(id, updates);
-
+      // console.log(' [WebsiteContext] Updating website:', id, updates);
+      
+      const apiUpdates: any = {};
+      
+      if (updates.name !== undefined) apiUpdates.name = updates.name;
+      if (updates.url !== undefined) apiUpdates.url = updates.url;
+      if (updates.description !== undefined) apiUpdates.description = updates.description;
+      if (updates.status !== undefined) apiUpdates.status = updates.status;
+      if (updates.domain !== undefined) apiUpdates.domain = updates.domain;
+      
+      const result = await api.websites.update(id, apiUpdates);
+      
       if (!result.success) {
         throw new Error(result.error || 'Failed to update website');
       }
 
-      // Update local state
       setWebsites(prev =>
         prev.map(w => (w.id === id ? { ...w, ...updates, updated_at: new Date().toISOString() } : w))
       );
@@ -142,7 +183,7 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
 
       return true;
     } catch (error: any) {
-      console.error('[WebsiteContext] Error updating website:', error);
+      console.error(' [WebsiteContext] Error updating website:', error);
       toast({
         title: "Error",
         description: error.message || "Failed to update website",
@@ -152,9 +193,9 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Delete website (soft delete by setting status to 'deleted')
   const deleteWebsite = async (id: string): Promise<boolean> => {
     try {
+      // console.log(' [WebsiteContext] Deleting website:', id);
       const result = await api.websites.delete(id);
 
       if (!result.success) {
@@ -175,7 +216,7 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
 
       return true;
     } catch (error: any) {
-      console.error('[WebsiteContext] Error deleting website:', error);
+      console.error(' [WebsiteContext] Error deleting website:', error);
       toast({
         title: "Error",
         description: error.message || "Failed to delete website",
@@ -185,17 +226,22 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Save current website to localStorage
+  //  Load websites when we navigate to dashboard
   useEffect(() => {
-    if (currentWebsite) {
-      localStorage.setItem("sigme_current_website", currentWebsite.id);
+    if (location.pathname.startsWith('/dashboard')) {
+      // console.log( '[WebsiteContext] Dashboard detected, loading websites...');
+      
+      // Small delay to ensure token is saved
+      const timer = setTimeout(() => {
+        refreshWebsites();
+      }, 100);
+      
+      return () => clearTimeout(timer);
+    } else {
+      // console.log(' [WebsiteContext] Not on dashboard, skipping load');
+      setIsLoading(false);
     }
-  }, [currentWebsite]);
-
-  // Don't fetch on mount - let ProtectedRoute call refreshWebsites
-  useEffect(() => {
-    console.log('[WebsiteContext] Initialized (waiting for explicit refresh)');
-  }, []);
+  }, [location.pathname]);
 
   return (
     <WebsiteContext.Provider
@@ -203,6 +249,7 @@ export function WebsiteProvider({ children }: { children: ReactNode }) {
         websites,
         currentWebsite,
         isLoading,
+        error,
         setCurrentWebsite,
         addWebsite,
         updateWebsite,

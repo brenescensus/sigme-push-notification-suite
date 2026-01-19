@@ -1,89 +1,107 @@
-//Handles user authentication:sigup,login,logout
-// src/pages/AuthPage.tsx
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+// src/pages/AuthPage.tsx 
+import { useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom"; //  Add these imports
 import { Mail, Lock, User, ArrowRight, Bell, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
-// import NotificationOnboarding from "@/components/NotificationOnboarding";
+import { api, tokenManager } from "@/lib/api";
 
 type AuthMode = "login" | "signup";
 
 export default function AuthPage() {
-  const navigate = useNavigate();
-
   const [mode, setMode] = useState<AuthMode>("login");
   const [loading, setLoading] = useState(false);
-
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
+  
+  //  Add navigation hooks
+  const navigate = useNavigate();
+  const location = useLocation();
+  
+  // Get the page user was trying to access (if redirected from protected route)
+  const from = (location.state as any)?.from?.pathname || '/dashboard';
 
-  // const [showNotificationOnboarding, setShowNotificationOnboarding] = useState(false);
-  const [currentWebsiteId, setCurrentWebsiteId] = useState<string | null>(null);
-
- 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
 
     try {
       if (mode === "signup") {
-        console.log(' [Auth] Attempting signup...');
+        // console.log('[Auth]  Attempting signup...');
         const response = await api.auth.signup(email, password, fullName);
         
-        console.log(' [Auth] Signup response:', response);
+        // console.log('[Auth]  Signup successful, response:', response);
+        
+        // Verify token was saved
+        const savedToken = tokenManager.get();
+        // console.log('[Auth]  Token after signup:', savedToken ? 'Exists' : 'Missing!');
+        
+        if (!savedToken) {
+          throw new Error('Authentication failed - no token received');
+        }
 
         toast({ 
-          title: "Account created!",
-          description: "Welcome to Sigme"
+          title: "Account created!", 
+          description: "Welcome to Sigme" 
         });
 
-        // Show notification onboarding for new users
-        setCurrentWebsiteId(null);
-        // setShowNotificationOnboarding(true);
+        // console.log('[Auth]  Navigating to dashboard...');
+        
+        //  Small delay to ensure token is persisted
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        navigate('/dashboard', { replace: true });
         return;
       }
 
       // LOGIN
-      console.log(' [Auth] Attempting login...');
+      // console.log('[Auth]  Attempting login...');
       const response = await api.auth.login(email, password);
       
-      console.log(' [Auth] Login response:', response);
-
-      toast({ 
-        title: "Welcome back!",
-        description: "Signed in successfully"
-      });
-
-      // Show onboarding only if permission not granted
-      if (Notification.permission === "default") {
-        // setShowNotificationOnboarding(true);
-      } else {
-        navigate("/dashboard");
+      // console.log('[Auth]  Login successful, response:', response);
+      
+      // Verify token was saved
+      const savedToken = tokenManager.get();
+      // console.log('[Auth]  Token after login:', savedToken ? 'Exists' : 'Missing!');
+      
+      if (!savedToken) {
+        throw new Error('Authentication failed - no token received');
       }
 
+      toast({ 
+        title: "Welcome back!", 
+        description: "Signed in successfully" 
+      });
+
+      // console.log('[Auth]  Navigating to:', from);
+      
+      //  Small delay to ensure token is persisted
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      navigate(from, { replace: true });
+
     } catch (err: any) {
-      console.error(' [Auth] Error:', err);
+      console.error('[Auth]  Error:', err);
 
       let message = err.message || "Authentication failed";
-
-      if (message.includes("Invalid login credentials")) {
+      
+      // Better error messages
+      if (message.includes("Invalid login credentials") || message.includes("Invalid")) {
         message = "Invalid email or password";
-      } else if (message.includes("User already registered")) {
+      } else if (message.includes("User already registered") || message.includes("already")) {
         message = "Email already registered. Please sign in.";
       } else if (message.includes("Password")) {
         message = "Password must be at least 6 characters";
       }
 
-      toast({
-        title: "Error",
-        description: message,
-        variant: "destructive",
+      toast({ 
+        title: "Error", 
+        description: message, 
+        variant: "destructive" 
       });
     } finally {
       setLoading(false);
@@ -147,7 +165,6 @@ export default function AuthPage() {
             </p>
           </div>
 
-          {/* Mode Toggle */}
           <div className="flex gap-1 p-1 rounded-lg bg-muted">
             <button
               type="button"
@@ -245,18 +262,6 @@ export default function AuthPage() {
           </form>
         </div>
       </div>
-
-      {/* Notification Onboarding */}
-      {/* {showNotificationOnboarding && ( */}
-        {/* // <NotificationOnboarding */}
-        {/* //   websiteId={currentWebsiteId} */}
-        {/* //   skipable={false} */}
-        {/* //   onComplete={() => { */}
-        {/* //     // setShowNotificationOnboarding(false); */}
-        {/* //     navigate("/dashboard"); */}
-        {/* //   }} */}
-        {/* // /> */}
-      {/* )} */}
     </div>
   );
 }

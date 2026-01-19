@@ -99,7 +99,7 @@ In Sigme dashboard → Subscribers page:
 **In browser console, you should see:**
 ```
 [Sigme SW v2.0.0-audit] ========================================
-[Sigme SW v2.0.0-audit] 🔔 PUSH EVENT RECEIVED
+[Sigme SW v2.0.0-audit]  PUSH EVENT RECEIVED
 [Sigme SW v2.0.0-audit] ========================================
 [Sigme SW v2.0.0-audit] Timestamp: 2025-01-15T...
 [Sigme SW v2.0.0-audit] Has data: true

@@ -1,4 +1,4 @@
-// src/components/layout/DashboardLayout.tsx
+// src/components/layout/DashboardLayout.tsx 
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -17,7 +17,6 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { WebsiteSelector } from "@/components/dashboard/WebsiteSelector";
-import { api } from "@/lib/api";
 import { toast } from "sonner";
 import sigmeLogo from "@/assets/sigme-logo.png";
 
@@ -40,26 +39,29 @@ function Sidebar({ className, onLogout }: { className?: string; onLogout: () => 
   const [user, setUser] = useState<{ email?: string; name?: string } | null>(null);
 
   useEffect(() => {
-    //  Get user info from API using cookies
-    const loadUser = async () => {
+    //  Get user from localStorage
+    const loadUser = () => {
       try {
-        const data = await api.websites.list();
-        // setUser({
-        //  email: user.email,
-        //  name:user.email?.split('@')[0] || 'User',
-        // });
-        const userData = await api.auth.me();
-        if (userData && userData.user) {
+        const userData = localStorage.getItem('user');
+        if (userData) {
+          const parsed = JSON.parse(userData);
           setUser({
-            email: userData.user.email || 'user@example.com',
-            name: userData.user.user_metadata?.full_name ||
-              userData.user.email?.split('@')[0] ||
-              'User',
+            email: parsed.email || 'user@example.com',
+            name: parsed.full_name || parsed.name || parsed.email?.split('@')[0] || 'User',
+          });
+        } else {
+          // Fallback
+          setUser({
+            email: 'user@example.com',
+            name: 'User',
           });
         }
       } catch (error) {
         console.error('Failed to load user:', error);
-        // User will be redirected by ProtectedRoute
+        setUser({
+          email: 'user@example.com',
+          name: 'User',
+        });
       }
     };
 
@@ -112,9 +114,9 @@ function Sidebar({ className, onLogout }: { className?: string; onLogout: () => 
             <p className="text-sm font-medium text-sidebar-foreground truncate">{user?.name || 'User'}</p>
             <p className="text-xs text-muted-foreground truncate">{user?.email || ''}</p>
           </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          <Button 
+            variant="ghost" 
+            size="icon-sm" 
             className="text-muted-foreground hover:text-foreground"
             onClick={onLogout}
             title="Sign out"
@@ -130,22 +132,18 @@ function Sidebar({ className, onLogout }: { className?: string; onLogout: () => 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
-
+  
   // Get current page title
   const currentPage = navigation.find((item) => item.href === location.pathname);
   const pageTitle = currentPage?.name || "Dashboard";
 
-  const handleLogout = async () => {
-    try {
-      //  Call logout API which clears cookies
-      await api.auth.logout();
-      toast.success("Signed out successfully");
-      navigate("/login");
-    } catch (error: any) {
-      console.error('Logout error:', error);
-      // Force navigate even on error
-      navigate("/login");
-    }
+  const handleLogout = () => {
+    //  Clear tokens from localStorage
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('user');
+    
+    toast.success("Signed out successfully");
+    navigate("/login");
   };
 
   return (
